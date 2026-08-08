@@ -10,6 +10,12 @@ export interface FurnitureDef {
   height: number;
   /** If set, this is a 2D-only architectural symbol (not rendered in 3D) */
   symbol?: boolean;
+  /** 'custom' items are user-added and live on the project, not in this array */
+  source?: 'catalog' | 'custom';
+  /** Product photo as a data URL — the reference image for 3D generation */
+  imageUrl?: string;
+  /** GLB to render instead of the built-in model map. Any URL works. */
+  modelUrl?: string;
 }
 
 export const furnitureCatalog: FurnitureDef[] = [
@@ -245,8 +251,25 @@ export const furnitureCatalog: FurnitureDef[] = [
   { id: 'sym_gas_line', name: 'Gas Line', category: 'Plumbing', icon: '⛽', color: '#f59e0b', width: 15, depth: 15, height: 0, symbol: true },
 ];
 
+/**
+ * User-added items, mirrored here from the open project so that the many
+ * synchronous `getCatalogItem` callers (canvas renderer, 3D loader, exporters,
+ * hit testing) resolve them without each needing the project store.
+ * Kept in sync by stores/project.ts — do not populate this directly.
+ */
+const customDefs = new Map<string, FurnitureDef>();
+
+export function setCustomFurniture(defs: FurnitureDef[]): void {
+  customDefs.clear();
+  for (const d of defs) customDefs.set(d.id, { ...d, source: 'custom' });
+}
+
+export function getCustomFurniture(): FurnitureDef[] {
+  return [...customDefs.values()];
+}
+
 export function getCatalogItem(id: string): FurnitureDef | undefined {
-  return furnitureCatalog.find(f => f.id === id);
+  return furnitureCatalog.find(f => f.id === id) ?? customDefs.get(id);
 }
 
 export const furnitureCategories = [...new Set(furnitureCatalog.map(f => f.category))];

@@ -112,7 +112,7 @@
   <div class="bg-gradient-to-r from-slate-800 to-slate-700 shadow-sm">
     <div class="max-w-5xl mx-auto px-6 py-5 flex items-center justify-between">
       <div>
-        <h1 class="text-2xl font-bold text-white">Floor Plan Editor</h1>
+        <h1 class="text-2xl font-bold text-white">Roomcraft</h1>
         <p class="text-sm text-white/50 mt-0.5">{projects.length} project{projects.length !== 1 ? 's' : ''}</p>
       </div>
       <div class="flex items-center gap-3">

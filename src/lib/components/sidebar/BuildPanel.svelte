@@ -10,7 +10,7 @@
   import { getModelFile, generateThumbnail, getThumbnail, preloadThumbnails } from '$lib/utils/furnitureThumbnails';
   import { onMount } from 'svelte';
   import { createProjectFromRoomPlan, extractRoomJsonFromZip, ORTHO_VERSION } from '$lib/utils/roomplanImport';
-  import { currentProject, loadProject } from '$lib/stores/project';
+  import { currentProject, loadProject, addCustomFurniture, removeCustomFurniture } from '$lib/stores/project';
 
   // AreaSummaryPanel moved to top bar dialog
   let activeTab = $state<'draw' | 'rooms' | 'objects'>('draw');
@@ -101,21 +101,111 @@
     favoriteIds.map(id => furnitureCatalog.find(f => f.id === id)).filter(Boolean) as FurnitureDef[]
   );
 
+  const MY_ITEMS = 'My items';
+
+  // User-added items live on the project; show them ahead of the built-ins.
+  let customFurn = $state<FurnitureDef[]>([]);
+  currentProject.subscribe((p) => { customFurn = p?.customFurniture ?? []; });
+
   let filtered = $derived(
     (() => {
       const s = search.toLowerCase();
       let items = selectedCategory === 'Favorites'
         ? favoriteItems
-        : furnitureCatalog.filter((f) => {
-            const matchCat = selectedCategory === 'All' || f.category === selectedCategory;
-            return matchCat;
-          });
+        : selectedCategory === MY_ITEMS
+          ? customFurn
+          : [...customFurn, ...furnitureCatalog].filter((f) => {
+              const matchCat = selectedCategory === 'All' || f.category === selectedCategory;
+              return matchCat;
+            });
       if (s) {
         items = items.filter(f => f.name.toLowerCase().includes(s));
       }
       return items;
     })()
   );
+
+  // --- Add your own item -------------------------------------------------
+  /** Longest edge of the stored photo. Keeps projects inside the localStorage
+   *  quota while staying sharp enough to use as a 3D-generation reference. */
+  const PHOTO_MAX_PX = 640;
+
+  let showAddItem = $state(false);
+  let newItem = $state({ name: '', category: 'Living Room', width: 100, depth: 60, height: 75 });
+  let newItemPhoto = $state<string | null>(null);
+  let addItemError = $state<string | null>(null);
+  let itemPhotoInput = $state<HTMLInputElement | null>(null);
+
+  function resetAddItem() {
+    newItem = { name: '', category: 'Living Room', width: 100, depth: 60, height: 75 };
+    newItemPhoto = null;
+    addItemError = null;
+  }
+
+  /** Downscale to PHOTO_MAX_PX on the long edge and re-encode as JPEG. */
+  function downscale(dataUrl: string): Promise<string> {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        const scale = Math.min(1, PHOTO_MAX_PX / Math.max(img.naturalWidth, img.naturalHeight));
+        const w = Math.round(img.naturalWidth * scale);
+        const h = Math.round(img.naturalHeight * scale);
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return resolve(dataUrl);
+        ctx.drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL('image/jpeg', 0.82));
+      };
+      img.onerror = () => resolve(dataUrl);
+      img.src = dataUrl;
+    });
+  }
+
+  function onItemPhotoUpload(e: Event) {
+    const input = e.target as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = '';
+    if (!file) return;
+    if (file.size > 10 * 1024 * 1024) { addItemError = 'Photo too large (max 10 MB)'; return; }
+    addItemError = null;
+    const reader = new FileReader();
+    reader.onload = async () => {
+      newItemPhoto = await downscale(reader.result as string);
+      if (!newItem.name) newItem.name = file.name.replace(/\.[^.]+$/, '');
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function saveNewItem() {
+    const name = newItem.name.trim();
+    if (!name) { addItemError = 'Give the item a name.'; return; }
+    const { width, depth, height } = newItem;
+    if (![width, depth, height].every((n) => Number.isFinite(n) && n > 0)) {
+      addItemError = 'Width, depth and height must all be greater than 0.';
+      return;
+    }
+    const id = addCustomFurniture({
+      name,
+      category: newItem.category,
+      icon: '📦',
+      color: '#7c8ea3',
+      width,
+      depth,
+      height,
+      imageUrl: newItemPhoto ?? undefined,
+    });
+    if (!id) { addItemError = 'Open or create a project first.'; return; }
+    resetAddItem();
+    showAddItem = false;
+    selectedCategory = MY_ITEMS;
+    // Arm it for placing, same as clicking a catalog tile: the canvas only
+    // places while the furniture tool is active.
+    selectedTool.set('furniture');
+    placingFurnitureId.set(id);
+    addToRecent(id);
+  }
 
   const doorCatalog: { type: Door['type']; name: string; desc: string; icon: string }[] = [
     { type: 'single', name: 'Single', desc: '90cm swing', icon: 'M6 3h12v18H6z' },
@@ -606,6 +696,10 @@
             class="px-2 py-0.5 rounded-full text-[10px] font-medium {selectedCategory === 'Favorites' ? 'bg-pink-500 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}"
             onclick={() => selectedCategory = 'Favorites'}
           >♥ Favorites{favoriteIds.length ? ` (${favoriteIds.length})` : ''}</button>
+          <button
+            class="px-2 py-0.5 rounded-full text-[10px] font-medium {selectedCategory === MY_ITEMS ? 'bg-emerald-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}"
+            onclick={() => selectedCategory = MY_ITEMS}
+          >📦 {MY_ITEMS}{customFurn.length ? ` (${customFurn.length})` : ''}</button>
           {#each furnitureCategories as cat}
             <button
               class="px-2 py-0.5 rounded-full text-[10px] font-medium {selectedCategory === cat ? 'text-white' : 'text-gray-600 hover:bg-gray-200'}"
@@ -654,6 +748,79 @@
           <hr class="border-gray-100" />
         {/if}
 
+        <!-- Add your own item -->
+        <div class="mt-2">
+          {#if !showAddItem}
+            <button
+              class="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg border-2 border-dashed border-emerald-300 text-emerald-700 hover:bg-emerald-50 text-xs font-semibold"
+              onclick={() => { resetAddItem(); showAddItem = true; }}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              Add your own item
+            </button>
+          {:else}
+            <div class="rounded-lg border border-emerald-200 bg-emerald-50/50 p-3 space-y-2">
+              <div class="flex items-center justify-between">
+                <span class="text-xs font-semibold text-emerald-800">New item</span>
+                <button class="text-gray-400 hover:text-gray-600 text-sm leading-none" onclick={() => { showAddItem = false; resetAddItem(); }} aria-label="Cancel">✕</button>
+              </div>
+
+              <!-- Photo -->
+              <button
+                class="w-full h-24 rounded-lg border-2 border-dashed border-gray-300 bg-white hover:border-emerald-400 flex items-center justify-center overflow-hidden"
+                onclick={() => itemPhotoInput?.click()}
+              >
+                {#if newItemPhoto}
+                  <img src={newItemPhoto} alt="Item preview" class="max-h-full max-w-full object-contain" />
+                {:else}
+                  <span class="text-[11px] text-gray-400">Click to add a photo (optional)</span>
+                {/if}
+              </button>
+              <input type="file" accept="image/*" class="hidden" bind:this={itemPhotoInput} onchange={onItemPhotoUpload} />
+
+              <input
+                type="text"
+                placeholder="Name (e.g. VIMLE sofa)"
+                class="w-full px-2 py-1.5 border border-gray-200 rounded text-xs outline-none focus:border-emerald-400"
+                bind:value={newItem.name}
+              />
+
+              <select
+                class="w-full px-2 py-1.5 border border-gray-200 rounded text-xs bg-white outline-none focus:border-emerald-400"
+                bind:value={newItem.category}
+              >
+                {#each furnitureCategories as cat}
+                  <option value={cat}>{cat}</option>
+                {/each}
+              </select>
+
+              <div class="grid grid-cols-3 gap-1.5">
+                <label class="block">
+                  <span class="text-[10px] text-gray-500">Width cm</span>
+                  <input type="number" min="1" class="w-full px-2 py-1 border border-gray-200 rounded text-xs outline-none focus:border-emerald-400" bind:value={newItem.width} />
+                </label>
+                <label class="block">
+                  <span class="text-[10px] text-gray-500">Depth cm</span>
+                  <input type="number" min="1" class="w-full px-2 py-1 border border-gray-200 rounded text-xs outline-none focus:border-emerald-400" bind:value={newItem.depth} />
+                </label>
+                <label class="block">
+                  <span class="text-[10px] text-gray-500">Height cm</span>
+                  <input type="number" min="1" class="w-full px-2 py-1 border border-gray-200 rounded text-xs outline-none focus:border-emerald-400" bind:value={newItem.height} />
+                </label>
+              </div>
+
+              {#if addItemError}
+                <p class="text-[11px] text-red-600">{addItemError}</p>
+              {/if}
+
+              <button
+                class="w-full px-3 py-2 rounded-lg bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700"
+                onclick={saveNewItem}
+              >Add to my items</button>
+            </div>
+          {/if}
+        </div>
+
         <!-- Catalog grid -->
         <div class="grid grid-cols-2 gap-2 mt-2">
           {#each filtered as item}
@@ -676,7 +843,20 @@
                 onkeydown={(e: KeyboardEvent) => { if (e.key === 'Enter') { e.stopPropagation(); toggleFavorite(item.id); } }}
                 title={favoriteIds.includes(item.id) ? 'Remove from favorites' : 'Add to favorites'}
               >{favoriteIds.includes(item.id) ? '♥' : '♡'}</span>
-              {#if thumbsReady >= 0 && getModelFile(item.id) && getThumbnail(getModelFile(item.id)!)}
+              {#if item.source === 'custom'}
+                <!-- svelte-ignore node_invalid_placement -->
+                <span
+                  role="button"
+                  tabindex="0"
+                  class="absolute top-1 left-1 text-[12px] leading-none cursor-pointer text-gray-300 hover:text-red-500"
+                  onclick={(e: MouseEvent) => { e.stopPropagation(); e.preventDefault(); if (confirm(`Delete "${item.name}" and remove it from the plan?`)) removeCustomFurniture(item.id); }}
+                  onkeydown={(e: KeyboardEvent) => { if (e.key === 'Enter') { e.stopPropagation(); removeCustomFurniture(item.id); } }}
+                  title="Delete this item"
+                >✕</span>
+              {/if}
+              {#if item.imageUrl}
+                <img src={item.imageUrl} alt={item.name} class="w-12 h-12 object-contain rounded" />
+              {:else if thumbsReady >= 0 && getModelFile(item.id) && getThumbnail(getModelFile(item.id)!)}
                 <img src={getThumbnail(getModelFile(item.id)!)} alt={item.name} class="w-12 h-12 object-contain" />
               {:else}
                 <div class="w-10 h-10 rounded-lg flex items-center justify-center" style="background-color: {item.color}20">

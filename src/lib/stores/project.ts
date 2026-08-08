@@ -1,4 +1,5 @@
 import { writable, derived, get } from 'svelte/store';
+import { setCustomFurniture, type FurnitureDef } from '$lib/utils/furnitureCatalog';
 import type { Project, Floor, Wall, Door, Window as Win, FurnitureItem, Point, Stair, Column, BackgroundImage, GuideLine, ElementGroup, EntourageItem } from '$lib/models/types';
 
 
@@ -24,6 +25,10 @@ export function createDefaultProject(name = 'Untitled Project'): Project {
 }
 
 export const currentProject = writable<Project | null>(null);
+
+// Mirror the open project's custom furniture into the catalog module, so the
+// synchronous getCatalogItem() callers resolve user-added items too.
+currentProject.subscribe((p) => setCustomFurniture(p?.customFurniture ?? []));
 
 export const activeFloor = derived(currentProject, ($p) => {
   if (!$p) return null;
@@ -482,6 +487,49 @@ export function addCustomEntourage(name: string, dataUrl: string, aspect: number
   p.updatedAt = new Date();
   currentProject.set({ ...p });
   return id;
+}
+
+/**
+ * Register a user-added item (photo + real measurements) on the project.
+ * Until a 3D model is generated for it, the built-in fallbacks render it as a
+ * correctly-sized rounded rect in plan and a box in 3D.
+ */
+export function addCustomFurniture(
+  def: Omit<FurnitureDef, 'id' | 'source'>,
+): string {
+  const p = get(currentProject);
+  if (!p) return '';
+  snapshot('Added custom item');
+  if (!p.customFurniture) p.customFurniture = [];
+  const id = `custom_${uid()}`;
+  p.customFurniture.push({ ...def, id, source: 'custom' });
+  p.updatedAt = new Date();
+  currentProject.set({ ...p });
+  return id;
+}
+
+/** Attach a generated 3D model to a custom item. */
+export function setCustomFurnitureModel(id: string, modelUrl: string): void {
+  const p = get(currentProject);
+  if (!p?.customFurniture) return;
+  const def = p.customFurniture.find((d) => d.id === id);
+  if (!def) return;
+  def.modelUrl = modelUrl;
+  p.updatedAt = new Date();
+  currentProject.set({ ...p });
+}
+
+export function removeCustomFurniture(id: string): void {
+  const p = get(currentProject);
+  if (!p?.customFurniture) return;
+  snapshot('Removed custom item');
+  p.customFurniture = p.customFurniture.filter((d) => d.id !== id);
+  // Drop any placed instances so the plan never references a missing def.
+  for (const floor of p.floors) {
+    floor.furniture = floor.furniture.filter((f) => f.catalogId !== id);
+  }
+  p.updatedAt = new Date();
+  currentProject.set({ ...p });
 }
 
 /** Scale calibration mode */

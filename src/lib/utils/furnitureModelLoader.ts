@@ -161,9 +161,14 @@ const MODEL_MAP: Record<string, ModelMapping> = {
 function loadGLBModel(catalogId: string): Promise<THREE.Group | null> {
   const mapping = MODEL_MAP[catalogId];
   if (!mapping) return Promise.resolve(null);
+  return loadGLB(`${base}/models/${mapping.file}.glb`, mapping.file);
+}
 
-  const cacheKey = mapping.file;
-
+/**
+ * Load a GLB from any URL, cached by key. Used both for the bundled Kenney
+ * models and for models generated from a user's own photo.
+ */
+function loadGLB(url: string, cacheKey: string): Promise<THREE.Group | null> {
   // Return cached clone
   if (modelCache.has(cacheKey)) {
     return Promise.resolve(modelCache.get(cacheKey)!.clone());
@@ -176,7 +181,7 @@ function loadGLBModel(catalogId: string): Promise<THREE.Group | null> {
 
   const promise = new Promise<THREE.Group | null>((resolve) => {
     loader.load(
-      `${base}/models/${mapping.file}.glb`,
+      url,
       (gltf) => {
         const group = new THREE.Group();
         // Clone the scene into our group
@@ -264,10 +269,16 @@ export function createFurnitureModelWithGLB(
   const procedural = createFurnitureModel(catalogId, def);
   container.add(procedural);
 
-  // Try to load GLB async
-  const mapping = MODEL_MAP[catalogId];
+  // Try to load GLB async. A def's own modelUrl (e.g. generated from the
+  // user's photo) wins over the bundled model map.
+  const mapping: ModelMapping | undefined = def.modelUrl
+    ? { file: def.modelUrl }
+    : MODEL_MAP[catalogId];
+  const load = def.modelUrl
+    ? loadGLB(def.modelUrl, `url:${def.modelUrl}`)
+    : loadGLBModel(catalogId);
   if (mapping) {
-    loadGLBModel(catalogId).then((glbModel) => {
+    load.then((glbModel) => {
       if (glbModel) {
         try {
           // Remove procedural and dispose its resources, then add GLB

@@ -536,10 +536,10 @@ export function exportPDF(project: Project) {
     // Branding
     pdf.setFontSize(9);
     pdf.setFont('helvetica', 'bold');
-    pdf.text('openplan3d.com', col2 + 4, tbY + 9);
+    pdf.text('Roomcraft', col2 + 4, tbY + 9);
     pdf.setFont('helvetica', 'normal');
     pdf.setFontSize(7);
-    pdf.text('Created with Open 3D Floor Planner', col2 + 4, tbY + 15);
+    pdf.text('Created with Roomcraft', col2 + 4, tbY + 15);
   }
 
   // ── Page 1: Floor Plan ──

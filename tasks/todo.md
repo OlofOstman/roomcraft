@@ -29,23 +29,38 @@ and the zustand store.
       routes serve 200, and a served fixture extracted name/image/price/dims/category
       end-to-end through the real endpoint
 
+## Direction change 2 (2026-08-08): photo + measurements, not scraping
+
+Dropped add-by-link. Live retail pages 403 a server-side fetch (confirmed against IKEA), and
+scraped images are often lifestyle shots with several objects in frame — bad input for
+image-to-3D. The user uploads a clean product photo and types the real measurements instead,
+so dimensions are authoritative rather than a regex guess.
+
+The extraction pipeline (`src/lib/extract/`, `/api/extract`, `cheerio`, `@anthropic-ai/sdk`)
+is now unused. Left in place for now; delete once the photo flow is settled.
+
+- [x] 5. Rebrand: page title, welcome screen, PDF footer
+- [x] 6. `FurnitureDef` + `imageUrl` / `modelUrl` / `source`; `customFurniture` on `Project`;
+      `getCatalogItem` resolves custom defs from a registry synced by `stores/project.ts`
+- [x] 7. "Add your own item" panel — photo (downscaled to 640px, JPEG q0.82), name, category,
+      W/D/H in cm. Lands in a "My items" category and is armed for placing immediately.
+- [x] 8. `furnitureModelLoader` prefers a def's `modelUrl` over the `MODEL_MAP` lookup
+
 ## Next
 
-- [ ] 5. Extend `FurnitureDef` (`src/lib/utils/furnitureCatalog.ts`) with `modelUrl`,
-      `imageUrl`, `price`, `sourceUrl`, `source: 'catalog' | 'link'`
-- [ ] 6. Add-by-link UI: paste URL → confirm/correct dims → item lands in the catalog
-- [ ] 7. Teach `furnitureModelLoader.ts` to prefer `modelUrl` over the `MODEL_MAP` lookup;
-      `GLTFLoader` already loads from any URL
-- [ ] 8. Tripo image-to-3D job: scraped photo → GLB. **Needs a placeholder** — generation takes
-      30s–3min, so the item must appear immediately as a correctly-sized box and get swapped
-      when the job returns, or the walkthrough has holes in it.
-- [ ] 9. Generic top-down symbol for link items, keyed off the scraped category, so they read
-      correctly in plan view from the moment they're added
+- [ ] 9. Tripo image-to-3D: uploaded photo → GLB → `setCustomFurnitureModel(id, url)`.
+      Generation takes 30s–3min, so the box placeholder must stay until the model lands.
+- [ ] 10. **Move blobs to IndexedDB before shipping generation.** Photos are downscaled and
+      fine in localStorage, but GLBs are 1–5 MB each and the quota is ~5–10 MB. Upstream's
+      handler deletes *other projects* to save the current one — nasty surprise.
+- [ ] 11. Make the walkthrough look realistic (the actual goal): PBR materials, better
+      lighting, shadows, and real meshes instead of boxes.
+- [ ] 12. Walkthrough spawns inside furniture — needs a sensible spawn point.
 
 ## Open questions
 
-- Tripo costs ~$0.40–0.50/item direct (40–50 credits at $0.01). Fine for paid users; decide
-  whether the free tier gets AI generation at all, or only library-match + textured box.
+- Tripo costs ~$0.40–0.50/item direct (40–50 credits at $0.01). Decide whether the free tier
+  gets generation at all.
 - `MODEL_SOURCES.md` lists poly.pizza as mostly CC-BY. Currently shipped models are Kenney CC0,
   so no attribution is due — re-check before pulling in more.
 

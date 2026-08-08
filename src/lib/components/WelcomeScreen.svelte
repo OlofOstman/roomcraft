@@ -135,8 +135,8 @@
     <!-- Main welcome card -->
     <div class="bg-white rounded-2xl shadow-2xl p-10 max-w-md w-full mx-4 text-center">
       <div class="text-5xl mb-4">🏠</div>
-      <h1 class="text-3xl font-bold text-gray-800 mb-2">Welcome</h1>
-      <p class="text-gray-500 mb-8">Design your dream space in 2D and 3D</p>
+      <h1 class="text-3xl font-bold text-gray-800 mb-2">Roomcraft</h1>
+      <p class="text-gray-500 mb-8">Plan it in 2D, then walk through it in 3D</p>
 
       <div class="space-y-3">
         <button

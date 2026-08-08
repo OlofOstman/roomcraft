@@ -1,3 +1,7 @@
+// Type-only import: erased at build time, so this does not create a cycle with
+// furnitureCatalog (which imports nothing).
+import type { FurnitureDef } from '$lib/utils/furnitureCatalog';
+
 export interface Point { x: number; y: number; }
 
 export interface Wall {
@@ -187,4 +191,6 @@ export interface Project {
   createdAt: Date;
   updatedAt: Date;
   customEntourage?: CustomEntourageDef[];
+  /** User-added furniture (photo + real measurements), saved with the project */
+  customFurniture?: FurnitureDef[];
 }
