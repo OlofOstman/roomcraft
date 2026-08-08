@@ -1,37 +1,39 @@
 {
-  "name": "roomcraft",
-  "version": "0.1.0",
-  "private": true,
-  "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "eslint",
-    "test": "vitest run"
-  },
-  "dependencies": {
-    "@anthropic-ai/sdk": "^0.112.5",
-    "@react-three/drei": "^10.7.7",
-    "@react-three/fiber": "^9.6.1",
-    "cheerio": "^1.2.0",
-    "konva": "^10.3.0",
-    "next": "16.2.11",
-    "react": "19.2.4",
-    "react-dom": "19.2.4",
-    "react-konva": "^19.2.5",
-    "three": "^0.185.1",
-    "zustand": "^5.0.14"
-  },
-  "devDependencies": {
-    "@tailwindcss/postcss": "^4",
-    "@types/node": "^20",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
-    "@types/three": "^0.185.1",
-    "eslint": "^9",
-    "eslint-config-next": "16.2.11",
-    "tailwindcss": "^4",
-    "typescript": "^5",
-    "vitest": "^4.1.10"
-  }
+	"name": "roomcraft",
+	"private": true,
+	"version": "0.1.0",
+	"description": "Apartment planner — design in 2D, walk through in 3D, and furnish it by pasting product links",
+	"license": "MIT",
+	"type": "module",
+	"scripts": {
+		"dev": "vite dev",
+		"build": "vite build",
+		"preview": "vite preview",
+		"prepare": "svelte-kit sync || echo ''",
+		"test": "vitest run",
+		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch"
+	},
+	"devDependencies": {
+		"@sveltejs/adapter-auto": "^7.0.0",
+		"@sveltejs/adapter-node": "^5.5.3",
+		"@sveltejs/kit": "^2.50.2",
+		"@sveltejs/vite-plugin-svelte": "^6.2.4",
+		"@tailwindcss/vite": "^4.1.18",
+		"@types/three": "^0.182.0",
+		"svelte": "^5.49.2",
+		"svelte-check": "^4.3.6",
+		"tailwindcss": "^4.1.18",
+		"three": "^0.182.0",
+		"typescript": "^5.9.3",
+		"vite": "^7.3.1",
+		"vitest": "^4.1.10"
+	},
+	"dependencies": {
+		"@anthropic-ai/sdk": "^0.112.5",
+		"cheerio": "^1.2.0",
+		"dxf-writer": "^1.18.4",
+		"jspdf": "^4.1.0",
+		"jszip": "^3.10.1"
+	}
 }

@@ -1,5 +1,5 @@
 import * as cheerio from 'cheerio';
-import type { Dims, ExtractResult, FurnitureCategory } from '../types';
+import type { Dims, ExtractResult, FurnitureCategory } from './types';
 
 /**
  * Extract product data from a product-page HTML string.

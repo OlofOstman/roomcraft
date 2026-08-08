@@ -1,36 +1,55 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Roomcraft
 
-## Getting Started
+Plan an apartment in 2D, walk through it in 3D, and furnish it by **pasting a product link**.
 
-First, run the development server:
+Roomcraft is a fork of [openPlan3D](https://github.com/laanlabs/openPlan3D) (MIT, © theLodgeStudio),
+which supplies the floor-plan editor, the top-down architectural symbols, and the 3D walkthrough.
+What Roomcraft adds on top is add-by-link: paste a furniture product URL and get a to-scale item
+that appears both as a plan symbol and as something you can walk past.
+
+## Getting started
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open http://localhost:5173. No account, no server, no config — projects are stored in `localStorage`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Scripts
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+| Command | What it does |
+| --- | --- |
+| `npm run dev` | Vite dev server |
+| `npm run build` | Production build (adapter-node) |
+| `npm run preview` | Serve the production build |
+| `npm test` | Vitest — extraction parser unit tests |
+| `npm run check` | `svelte-check` typecheck |
 
-## Learn More
+## Add-by-link
 
-To learn more about Next.js, take a look at the following resources:
+`POST /api/extract` with `{ "url": "..." }` returns name, image, price, dimensions (cm) and a
+furniture category. It tries schema.org JSON-LD, then Open Graph + spec tables, then dimension
+regexes over the page text — handling mm/m units, comma decimals, and Swedish labels
+(`Bredd`/`Djup`/`Höjd`).
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Only when those fail *and* `ANTHROPIC_API_KEY` is set does it fall back to Claude with a
+JSON-schema-constrained call. Without a key the flow still works — the user types the dimensions in
+the confirm step. Copy `.env.example` to `.env` to enable the fallback.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Layout
 
-## Deploy on Vercel
+```
+src/lib/extract/        add-by-link parser + types (unit tested)
+src/routes/api/extract/ the extraction endpoint
+src/lib/utils/          furnitureCatalog, furnitureIcons (2D plan symbols),
+                        furnitureModelLoader (GLB), roomDetection, cadExport
+src/lib/components/     editor (2D canvas), viewer3d (Three.js), sidebar, toolbar
+static/models/          204 GLB furniture models — Kenney Furniture Kit (CC0)
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Licence and attribution
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Roomcraft is MIT. It inherits openPlan3D's MIT licence — see `LICENSE`, which retains the original
+copyright notice. Bundled 3D assets and their licences are listed in `MODEL_SOURCES.md`; the models
+currently shipped are CC0 and need no attribution, but check that file before adding more.
