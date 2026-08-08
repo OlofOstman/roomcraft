@@ -55,19 +55,33 @@ is now unused. Left in place for now; delete once the photo flow is settled.
       2048 shadow map over a tighter frustum, plus normalBias/radius for softer contact
       shadows. Explicit sRGB output.
 
+- [x] 11. Tripo image-to-3D wired end-to-end: `/api/generate-model` proxies upload/task/
+      status/GLB-download (key stays server-side); "✨ Make 3D" on custom items polls and
+      swaps the box for the GLB via `setCustomFurnitureModel`. **NOT verified against the
+      live API** — this container's egress blocks api.tripo3d.ai (confirmed: proxy 403s the
+      CONNECT). Error paths verified; needs one real generation run on a dev machine.
+- [x] 12a. GTAO ambient occlusion (EffectComposer + GTAOPass + OutputPass), tuned for the
+      cm-scale scene (radius 120). Verified via the AO debug buffer: correct contact
+      darkening at floor/wall junctions and corners. Composer falls back to plain
+      rendering if postprocessing fails.
+- [x] 12b. Ceiling regression fixed — the first realism pass dimmed ambient so far that
+      the (already existing) ceilings rendered near-black. Hemisphere ground colour now
+      carries downward-facing surfaces.
+- [x] 14. Walkthrough spawn: golden-angle spiral from the room centroid to the first
+      point clear of furniture footprints (circle approximation + 35cm clearance).
+
 ## Next
 
-- [ ] 11. Tripo image-to-3D: uploaded photo → GLB → `setCustomFurnitureModel(id, ref)`.
-      The socket is ready (`modelUrl` + blob store); needs a `TRIPO_API_KEY` and should
-      degrade to the box placeholder without one. Generation takes 30s–3min.
-- [ ] 12. Realism, round two — bigger wins than per-item generation:
-      - screen-space ambient occlusion (contact shadows are what sell interiors)
-      - real PBR textures on walls/floors from Poly Haven or ambientCG (both CC0, and
-        Poly Haven has a public API with no key)
-      - a ceiling in walkthrough mode; open-topped rooms leak sky light and read as a set
-- [ ] 13. Optional "render this view" using three-gpu-pathtracer (MIT). It converges to a
-      still rather than running live, so it suits a render button, not the walkthrough.
-- [ ] 14. Walkthrough spawns inside furniture / above walls — needs a sensible spawn point.
+- [ ] 13. Realism round two:
+      - real PBR textures on walls/floors — Poly Haven / ambientCG are both CC0, but
+        BLOCKED from this container (egress); download a handful on a dev machine and
+        commit them to static/textures/
+      - optional "render this view" via three-gpu-pathtracer (MIT) — converges to a
+        still, so a render button, not the live walkthrough
+- [ ] 15. Verify one real Tripo generation on a dev machine (egress blocks it here);
+      check the GLB lands, scales to the item dims, and survives reload from IndexedDB.
+- [ ] 16. ROTATE the Tripo API key that was pasted into the chat session, then put the
+      new one only in .env (gitignored).
 
 ## Open questions
 

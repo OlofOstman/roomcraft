@@ -8,6 +8,10 @@
   import * as THREE from 'three';
   import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
   import { PointerLockControls } from 'three/examples/jsm/controls/PointerLockControls.js';
+  import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+  import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+  import { GTAOPass } from 'three/examples/jsm/postprocessing/GTAOPass.js';
+  import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
   import MaterialPicker from './MaterialPicker.svelte';
   import { getCatalogItem, furnitureCatalog, furnitureCategories } from '$lib/utils/furnitureCatalog';
   import type { FurnitureDef } from '$lib/utils/furnitureCatalog';
@@ -21,6 +25,7 @@
   let container: HTMLDivElement;
   let renderer: THREE.WebGLRenderer;
   let envRenderTarget: THREE.WebGLRenderTarget | null = null;
+  let composer: EffectComposer | null = null;
   let scene: THREE.Scene;
   let camera: THREE.PerspectiveCamera;
   let controls: OrbitControls;
@@ -640,6 +645,45 @@
     }
   }
 
+  /**
+   * Ground-truth ambient occlusion. Contact shadows where furniture meets the
+   * floor and darkening in wall corners are most of what makes an interior
+   * read as a room rather than a diagram — the discrete lights can't produce
+   * them. GTAO is the better-quality successor to SSAO and ships with three.
+   */
+  function setupComposer() {
+    if (!renderer || !scene || !camera || !container) return;
+    const w = container.clientWidth;
+    const h = container.clientHeight;
+    try {
+      composer = new EffectComposer(renderer);
+      composer.setSize(w, h);
+      composer.setPixelRatio(window.devicePixelRatio);
+      composer.addPass(new RenderPass(scene, camera));
+
+      const gtao = new GTAOPass(scene, camera, w, h);
+      // The scene is modelled in centimetres, so the sampling radius is in cm
+      // too: ~25cm gathers occlusion at furniture-to-floor scale without
+      // smearing shade across whole walls.
+      gtao.updateGtaoMaterial({ radius: 120, distanceExponent: 1, thickness: 100, scale: 2 });
+      gtao.blendIntensity = 0.85;
+      composer.addPass(gtao);
+
+      // Applies tone mapping and the sRGB conversion at the end of the chain.
+      composer.addPass(new OutputPass());
+    } catch (err) {
+      console.warn('[ThreeViewer] postprocessing unavailable, rendering directly:', err);
+      composer = null;
+    }
+  }
+
+  /** Render through the composer when it's available, else straight to screen. */
+  function renderMain() {
+    if (!renderer || !scene || !camera) return;
+    if (composer) composer.render();
+    else renderer.render(scene, camera);
+  }
+
   function init() {
     scene = new THREE.Scene();
 
@@ -715,7 +759,7 @@
     ground.receiveShadow = true;
     scene.add(ground);
 
-    camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 1, 20000);
+    camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 10, 12000);
     camera.position.set(800, 600, 800);
 
     renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
@@ -733,6 +777,7 @@
     // paint — this is the single biggest realism win, and prefiltering the
     // sky we already generate keeps it free of any external asset.
     applyEnvironment();
+    setupComposer();
 
     controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
@@ -895,9 +940,12 @@
     // Lights — the PMREM environment now supplies most of the ambient term, so
     // the flat fills are dialled back; leaving them at their old levels on top
     // of IBL washes the scene out and flattens exactly what we just gained.
-    ambientLight = new THREE.AmbientLight(0xffffff, 0.12);
+    ambientLight = new THREE.AmbientLight(0xffffff, 0.22);
     scene.add(ambientLight);
-    hemiLight = new THREE.HemisphereLight(0x87ceeb, 0x8b7355, 0.25);
+    // Hemisphere shades by normal direction, so the ground colour is what
+    // lights downward-facing surfaces — i.e. the ceiling, which has no light
+    // source beneath it. Keeping it dark leaves interiors with a black lid.
+    hemiLight = new THREE.HemisphereLight(0x87ceeb, 0xb4a68f, 0.45);
     scene.add(hemiLight);
 
     // Key light (sun)
@@ -2021,6 +2069,55 @@
     }
   }
   
+  /**
+   * Pick a spawn point that isn't inside furniture. The room centroid is the
+   * natural spot, but in a furnished plan it's often the middle of a sofa or
+   * dining table — walkthrough then starts with a faceful of upholstery.
+   * Spiral outward from the centroid and take the first clear position.
+   */
+  function findClearSpawn(
+    centroid: { x: number; y: number },
+    roomPoly: { x: number; y: number }[],
+    floor: Floor,
+  ): { x: number; y: number } {
+    const CLEARANCE = 35; // cm of personal space around the camera
+    const blockers = floor.furniture
+      .map((f) => {
+        const def = getCatalogItem(f.catalogId);
+        if (!def || def.symbol) return null;
+        // Conservative circle test: half the footprint diagonal + clearance.
+        const w = (f.width ?? def.width) * (f.scale?.x ?? 1);
+        const d = (f.depth ?? def.depth) * (f.scale?.y ?? 1);
+        return { x: f.position.x, y: f.position.y, r: Math.hypot(w, d) / 2 + CLEARANCE };
+      })
+      .filter(Boolean) as { x: number; y: number; r: number }[];
+
+    const isClear = (p: { x: number; y: number }) =>
+      blockers.every((b) => Math.hypot(p.x - b.x, p.y - b.y) > b.r);
+
+    if (isClear(centroid)) return centroid;
+
+    // Golden-angle spiral: good angular coverage without a grid.
+    for (let i = 1; i <= 60; i++) {
+      const r = 25 * Math.sqrt(i);
+      const a = i * 2.39996;
+      const p = { x: centroid.x + r * Math.cos(a), y: centroid.y + r * Math.sin(a) };
+      if (isClear(p) && pointInPolygon(p, roomPoly)) return p;
+    }
+    return centroid; // fully furnished room — give up gracefully
+  }
+
+  function pointInPolygon(p: { x: number; y: number }, poly: { x: number; y: number }[]): boolean {
+    let inside = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const a = poly[i], b = poly[j];
+      if (a.y > p.y !== b.y > p.y && p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y) + a.x) {
+        inside = !inside;
+      }
+    }
+    return inside;
+  }
+
   function enterWalkthroughMode() {
     walkthroughMode = true;
     controls.enabled = false;
@@ -2045,7 +2142,8 @@
         const poly = getRoomPolygon(largestRoom, currentFloor.walls);
         if (poly.length > 0) {
           const centroid = roomCentroid(poly);
-          startPos = { x: centroid.x, y: eyeHeight, z: centroid.y };
+          const clear = findClearSpawn(centroid, poly, currentFloor);
+          startPos = { x: clear.x, y: eyeHeight, z: clear.y };
         }
       } else if (currentFloor.walls.length > 0) {
         // No rooms, use center of floor plan
@@ -2108,13 +2206,13 @@
         camera.rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, camera.rotation.x + pitch));
       }
       // Always render in walkthrough mode (camera constantly moving)
-      renderer.render(scene, camera);
+      renderMain();
     } else {
       // controls.update() may fire 'change' event (which sets sceneDirty)
       controls.update();
       if (sceneDirty) {
         sceneDirty = false;
-        renderer.render(scene, camera);
+        renderMain();
       }
     }
   }
@@ -2126,12 +2224,13 @@
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
     renderer.setSize(w, h);
+    composer?.setSize(w, h);
     markSceneDirty();
   }
 
   function takeScreenshot() {
     if (!renderer || !scene || !camera) return;
-    renderer.render(scene, camera);
+    renderMain();
     const dataUrl = renderer.domElement.toDataURL('image/png');
     const link = document.createElement('a');
     link.download = 'floorplan-3d.png';

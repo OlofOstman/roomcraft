@@ -11,7 +11,8 @@
   import { onMount } from 'svelte';
   import { createProjectFromRoomPlan, extractRoomJsonFromZip, ORTHO_VERSION } from '$lib/utils/roomplanImport';
   import { currentProject, loadProject, addCustomFurniture, removeCustomFurniture } from '$lib/stores/project';
-  import { putDataUrl, resolveAssetUrl, isBlobRef } from '$lib/services/blobStore';
+  import { putDataUrl, putBlob, resolveAssetUrl, isBlobRef } from '$lib/services/blobStore';
+  import { setCustomFurnitureModel } from '$lib/stores/project';
 
   // AreaSummaryPanel moved to top bar dialog
   let activeTab = $state<'draw' | 'rooms' | 'objects'>('draw');
@@ -126,6 +127,61 @@
   function thumbFor(item: FurnitureDef): string | null {
     if (!item.imageUrl) return null;
     return isBlobRef(item.imageUrl) ? (assetUrls[item.imageUrl] ?? null) : item.imageUrl;
+  }
+
+  // --- AI 3D generation (Tripo) ------------------------------------------
+  /** itemId → progress message while a generation is running */
+  let generating = $state<Record<string, string>>({});
+
+  async function generateModel(item: FurnitureDef) {
+    if (!item.imageUrl || generating[item.id]) return;
+    generating = { ...generating, [item.id]: 'starting…' };
+    try {
+      // The photo may be an idb: ref or object URL; POST needs a data URL.
+      const src = await resolveAssetUrl(item.imageUrl);
+      if (!src) throw new Error('Photo not found');
+      const blob = await (await fetch(src)).blob();
+      const dataUrl = await new Promise<string>((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(r.result as string);
+        r.onerror = () => rej(r.error);
+        r.readAsDataURL(blob);
+      });
+
+      const start = await fetch('/api/generate-model', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image: dataUrl }),
+      });
+      if (start.status === 503) throw new Error('No TRIPO_API_KEY configured on the server.');
+      if (!start.ok) throw new Error((await start.json()).error ?? `HTTP ${start.status}`);
+      const { taskId } = await start.json();
+
+      // Poll until done; the sized box stays in place the whole time.
+      for (let i = 0; i < 120; i++) {
+        await new Promise((r) => setTimeout(r, 5000));
+        const res = await fetch(`/api/generate-model?taskId=${taskId}`);
+        if (!res.ok) continue;
+        const s = await res.json();
+        if (s.status === 'success') {
+          generating = { ...generating, [item.id]: 'downloading…' };
+          const glb = await fetch(`/api/generate-model?taskId=${taskId}&download=1`);
+          if (!glb.ok) throw new Error('Model download failed.');
+          const ref = await putBlob(`model_${item.id}`, await glb.blob());
+          setCustomFurnitureModel(item.id, ref);
+          break;
+        }
+        if (s.status === 'failed' || s.status === 'cancelled' || s.status === 'banned') {
+          throw new Error(`Generation ${s.status}.`);
+        }
+        generating = { ...generating, [item.id]: `generating… ${s.progress ?? 0}%` };
+      }
+    } catch (e: any) {
+      alert(`3D generation failed: ${e?.message ?? e}`);
+    } finally {
+      const { [item.id]: _gone, ...rest } = generating;
+      generating = rest;
+    }
   }
 
   let filtered = $derived(
@@ -883,6 +939,21 @@
                   onkeydown={(e: KeyboardEvent) => { if (e.key === 'Enter') { e.stopPropagation(); removeCustomFurniture(item.id); } }}
                   title="Delete this item"
                 >✕</span>
+                {#if generating[item.id]}
+                  <span class="text-[9px] text-violet-600 font-medium">{generating[item.id]}</span>
+                {:else if item.modelUrl}
+                  <span class="text-[9px] text-emerald-600 font-medium" title="Has a generated 3D model">✓ 3D model</span>
+                {:else if item.imageUrl}
+                  <!-- svelte-ignore node_invalid_placement -->
+                  <span
+                    role="button"
+                    tabindex="0"
+                    class="text-[9px] px-1.5 py-0.5 rounded-full bg-violet-100 text-violet-700 hover:bg-violet-200 cursor-pointer font-medium"
+                    onclick={(e: MouseEvent) => { e.stopPropagation(); e.preventDefault(); generateModel(item); }}
+                    onkeydown={(e: KeyboardEvent) => { if (e.key === 'Enter') { e.stopPropagation(); generateModel(item); } }}
+                    title="Generate a real 3D model from the photo (takes 1–3 min)"
+                  >✨ Make 3D</span>
+                {/if}
               {/if}
               {#if thumbFor(item)}
                 <img src={thumbFor(item)} alt={item.name} class="w-12 h-12 object-contain rounded" />
