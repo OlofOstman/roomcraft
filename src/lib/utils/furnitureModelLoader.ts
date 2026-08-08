@@ -7,6 +7,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { base } from '$app/paths';
 import { createFurnitureModel } from './furnitureModels3d';
+import { resolveAssetUrl } from '$lib/services/blobStore';
 import type { FurnitureDef } from './furnitureCatalog';
 
 const loader = new GLTFLoader();
@@ -275,7 +276,9 @@ export function createFurnitureModelWithGLB(
     ? { file: def.modelUrl }
     : MODEL_MAP[catalogId];
   const load = def.modelUrl
-    ? loadGLB(def.modelUrl, `url:${def.modelUrl}`)
+    ? resolveAssetUrl(def.modelUrl).then((url) =>
+        url ? loadGLB(url, `url:${def.modelUrl}`) : null,
+      )
     : loadGLBModel(catalogId);
   if (mapping) {
     load.then((glbModel) => {

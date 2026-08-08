@@ -20,6 +20,7 @@
 
   let container: HTMLDivElement;
   let renderer: THREE.WebGLRenderer;
+  let envRenderTarget: THREE.WebGLRenderTarget | null = null;
   let scene: THREE.Scene;
   let camera: THREE.PerspectiveCamera;
   let controls: OrbitControls;
@@ -617,6 +618,28 @@
     return tex;
   }
 
+  /**
+   * Prefilter the sky gradient into a PMREM environment map and hand it to the
+   * scene, so every MeshStandardMaterial picks up soft ambient light and
+   * grazing reflections instead of being lit only by the discrete lights.
+   */
+  function applyEnvironment() {
+    if (!renderer || !scene || !skyTexture) return;
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    pmrem.compileEquirectangularShader();
+    try {
+      envRenderTarget?.dispose();
+      envRenderTarget = pmrem.fromEquirectangular(skyTexture);
+      scene.environment = envRenderTarget.texture;
+      // Indoors the sky would otherwise blow out the walls; keep it subtle.
+      scene.environmentIntensity = 0.55;
+    } catch (err) {
+      console.warn('[ThreeViewer] environment map unavailable:', err);
+    } finally {
+      pmrem.dispose();
+    }
+  }
+
   function init() {
     scene = new THREE.Scene();
 
@@ -702,7 +725,14 @@
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.2;
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
     container.appendChild(renderer.domElement);
+
+    // Image-based lighting. MeshStandardMaterial is physically based, but
+    // without an environment it has nothing to reflect and reads as flat
+    // paint — this is the single biggest realism win, and prefiltering the
+    // sky we already generate keeps it free of any external asset.
+    applyEnvironment();
 
     controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
@@ -862,23 +892,29 @@
       }
     });
 
-    // Lights — improved multi-source setup
-    ambientLight = new THREE.AmbientLight(0xffffff, 0.35);
+    // Lights — the PMREM environment now supplies most of the ambient term, so
+    // the flat fills are dialled back; leaving them at their old levels on top
+    // of IBL washes the scene out and flattens exactly what we just gained.
+    ambientLight = new THREE.AmbientLight(0xffffff, 0.12);
     scene.add(ambientLight);
-    hemiLight = new THREE.HemisphereLight(0x87ceeb, 0x8b7355, 0.4);
+    hemiLight = new THREE.HemisphereLight(0x87ceeb, 0x8b7355, 0.25);
     scene.add(hemiLight);
 
     // Key light (sun)
     sunLight = new THREE.DirectionalLight(0xfff8e7, 1.0);
     sunLight.position.set(500, 1200, 800);
     sunLight.castShadow = true;
-    sunLight.shadow.mapSize.width = 1024;
-    sunLight.shadow.mapSize.height = 1024;
-    sunLight.shadow.camera.left = -1500;
-    sunLight.shadow.camera.right = 1500;
-    sunLight.shadow.camera.top = 1500;
-    sunLight.shadow.camera.bottom = -1500;
-    sunLight.shadow.bias = -0.0005;
+    // Higher-res map over a tighter frustum: more shadow texels per cm, which
+    // is what stops contact shadows under furniture looking like grey mush.
+    sunLight.shadow.mapSize.width = 2048;
+    sunLight.shadow.mapSize.height = 2048;
+    sunLight.shadow.camera.left = -1200;
+    sunLight.shadow.camera.right = 1200;
+    sunLight.shadow.camera.top = 1200;
+    sunLight.shadow.camera.bottom = -1200;
+    sunLight.shadow.bias = -0.0004;
+    sunLight.shadow.normalBias = 2; // scene is in cm, so this is 2cm
+    sunLight.shadow.radius = 2;
     scene.add(sunLight);
 
     // Fill light — softer, opposite side to reduce harsh shadows

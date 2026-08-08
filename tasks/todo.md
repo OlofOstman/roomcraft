@@ -46,16 +46,28 @@ is now unused. Left in place for now; delete once the photo flow is settled.
       W/D/H in cm. Lands in a "My items" category and is armed for placing immediately.
 - [x] 8. `furnitureModelLoader` prefers a def's `modelUrl` over the `MODEL_MAP` lookup
 
+- [x] 9. IndexedDB blob store (`src/lib/services/blobStore.ts`). Photos and generated models
+      live there; the project JSON keeps only `idb:<key>` refs, resolved to object URLs at
+      render time. Deleting an item reclaims its blobs.
+- [x] 10. First realism pass: PMREM environment map off the existing sky gradient →
+      `scene.environment`, so MeshStandardMaterial finally has something to reflect. Flat
+      ambient/hemi dialled back (0.35→0.12, 0.4→0.25) since IBL now carries the ambient term;
+      2048 shadow map over a tighter frustum, plus normalBias/radius for softer contact
+      shadows. Explicit sRGB output.
+
 ## Next
 
-- [ ] 9. Tripo image-to-3D: uploaded photo → GLB → `setCustomFurnitureModel(id, url)`.
-      Generation takes 30s–3min, so the box placeholder must stay until the model lands.
-- [ ] 10. **Move blobs to IndexedDB before shipping generation.** Photos are downscaled and
-      fine in localStorage, but GLBs are 1–5 MB each and the quota is ~5–10 MB. Upstream's
-      handler deletes *other projects* to save the current one — nasty surprise.
-- [ ] 11. Make the walkthrough look realistic (the actual goal): PBR materials, better
-      lighting, shadows, and real meshes instead of boxes.
-- [ ] 12. Walkthrough spawns inside furniture — needs a sensible spawn point.
+- [ ] 11. Tripo image-to-3D: uploaded photo → GLB → `setCustomFurnitureModel(id, ref)`.
+      The socket is ready (`modelUrl` + blob store); needs a `TRIPO_API_KEY` and should
+      degrade to the box placeholder without one. Generation takes 30s–3min.
+- [ ] 12. Realism, round two — bigger wins than per-item generation:
+      - screen-space ambient occlusion (contact shadows are what sell interiors)
+      - real PBR textures on walls/floors from Poly Haven or ambientCG (both CC0, and
+        Poly Haven has a public API with no key)
+      - a ceiling in walkthrough mode; open-topped rooms leak sky light and read as a set
+- [ ] 13. Optional "render this view" using three-gpu-pathtracer (MIT). It converges to a
+      still rather than running live, so it suits a render button, not the walkthrough.
+- [ ] 14. Walkthrough spawns inside furniture / above walls — needs a sensible spawn point.
 
 ## Open questions
 

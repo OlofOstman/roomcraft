@@ -11,6 +11,7 @@
   import { onMount } from 'svelte';
   import { createProjectFromRoomPlan, extractRoomJsonFromZip, ORTHO_VERSION } from '$lib/utils/roomplanImport';
   import { currentProject, loadProject, addCustomFurniture, removeCustomFurniture } from '$lib/stores/project';
+  import { putDataUrl, resolveAssetUrl, isBlobRef } from '$lib/services/blobStore';
 
   // AreaSummaryPanel moved to top bar dialog
   let activeTab = $state<'draw' | 'rooms' | 'objects'>('draw');
@@ -107,6 +108,26 @@
   let customFurn = $state<FurnitureDef[]>([]);
   currentProject.subscribe((p) => { customFurn = p?.customFurniture ?? []; });
 
+  // Photos are stored in IndexedDB, so their `idb:` refs need resolving to
+  // object URLs before an <img> can show them.
+  let assetUrls = $state<Record<string, string>>({});
+  $effect(() => {
+    for (const def of customFurn) {
+      const ref = def.imageUrl;
+      if (ref && isBlobRef(ref) && !assetUrls[ref]) {
+        resolveAssetUrl(ref).then((u) => {
+          if (u) assetUrls = { ...assetUrls, [ref]: u };
+        });
+      }
+    }
+  });
+
+  /** Displayable thumbnail for an item, or null while a blob ref is loading. */
+  function thumbFor(item: FurnitureDef): string | null {
+    if (!item.imageUrl) return null;
+    return isBlobRef(item.imageUrl) ? (assetUrls[item.imageUrl] ?? null) : item.imageUrl;
+  }
+
   let filtered = $derived(
     (() => {
       const s = search.toLowerCase();
@@ -178,13 +199,22 @@
     reader.readAsDataURL(file);
   }
 
-  function saveNewItem() {
+  async function saveNewItem() {
     const name = newItem.name.trim();
     if (!name) { addItemError = 'Give the item a name.'; return; }
     const { width, depth, height } = newItem;
     if (![width, depth, height].every((n) => Number.isFinite(n) && n > 0)) {
       addItemError = 'Width, depth and height must all be greater than 0.';
       return;
+    }
+    // Photo goes to IndexedDB; the project keeps only the reference.
+    let imageUrl: string | undefined;
+    if (newItemPhoto) {
+      try {
+        imageUrl = await putDataUrl(`photo_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, newItemPhoto);
+      } catch {
+        imageUrl = newItemPhoto; // no IndexedDB — inline it and accept the quota cost
+      }
     }
     const id = addCustomFurniture({
       name,
@@ -194,7 +224,7 @@
       width,
       depth,
       height,
-      imageUrl: newItemPhoto ?? undefined,
+      imageUrl,
     });
     if (!id) { addItemError = 'Open or create a project first.'; return; }
     resetAddItem();
@@ -854,8 +884,8 @@
                   title="Delete this item"
                 >✕</span>
               {/if}
-              {#if item.imageUrl}
-                <img src={item.imageUrl} alt={item.name} class="w-12 h-12 object-contain rounded" />
+              {#if thumbFor(item)}
+                <img src={thumbFor(item)} alt={item.name} class="w-12 h-12 object-contain rounded" />
               {:else if thumbsReady >= 0 && getModelFile(item.id) && getThumbnail(getModelFile(item.id)!)}
                 <img src={getThumbnail(getModelFile(item.id)!)} alt={item.name} class="w-12 h-12 object-contain" />
               {:else}

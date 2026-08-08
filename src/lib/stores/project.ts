@@ -1,5 +1,6 @@
 import { writable, derived, get } from 'svelte/store';
 import { setCustomFurniture, type FurnitureDef } from '$lib/utils/furnitureCatalog';
+import { deleteBlob, isBlobRef } from '$lib/services/blobStore';
 import type { Project, Floor, Wall, Door, Window as Win, FurnitureItem, Point, Stair, Column, BackgroundImage, GuideLine, ElementGroup, EntourageItem } from '$lib/models/types';
 
 
@@ -523,6 +524,11 @@ export function removeCustomFurniture(id: string): void {
   const p = get(currentProject);
   if (!p?.customFurniture) return;
   snapshot('Removed custom item');
+  // Drop the item's photo/model from IndexedDB so deleting really reclaims space.
+  const gone = p.customFurniture.find((d) => d.id === id);
+  for (const ref of [gone?.imageUrl, gone?.modelUrl]) {
+    if (ref && isBlobRef(ref)) void deleteBlob(ref);
+  }
   p.customFurniture = p.customFurniture.filter((d) => d.id !== id);
   // Drop any placed instances so the plan never references a missing def.
   for (const floor of p.floors) {
