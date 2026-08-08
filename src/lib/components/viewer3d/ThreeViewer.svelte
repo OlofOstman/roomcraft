@@ -653,6 +653,22 @@
    */
   function setupComposer() {
     if (!renderer || !scene || !camera || !container) return;
+    // GTAO is far too heavy for software WebGL (SwiftShader/llvmpipe) — it
+    // drops the whole app to seconds-per-frame. Skip postprocessing there and
+    // render direct; ?ao=1/?ao=0 in the URL overrides the detection.
+    try {
+      const gl = renderer.getContext();
+      const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+      const glRenderer = dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : '';
+      const software = /swiftshader|llvmpipe|software/i.test(glRenderer);
+      const override = new URLSearchParams(location.search).get('ao');
+      if (override === '0' || (software && override !== '1')) {
+        console.info(`[ThreeViewer] AO disabled (renderer: ${glRenderer || 'unknown'})`);
+        return;
+      }
+    } catch {
+      // detection failed — assume a real GPU and continue
+    }
     const w = container.clientWidth;
     const h = container.clientHeight;
     try {
