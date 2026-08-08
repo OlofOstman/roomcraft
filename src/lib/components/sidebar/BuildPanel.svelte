@@ -210,12 +210,14 @@
   let showAddItem = $state(false);
   let newItem = $state({ name: '', category: 'Living Room', width: 100, depth: 60, height: 75 });
   let newItemPhoto = $state<string | null>(null);
+  let newItemColor = $state('#7c8ea3');
   let addItemError = $state<string | null>(null);
   let itemPhotoInput = $state<HTMLInputElement | null>(null);
 
   function resetAddItem() {
     newItem = { name: '', category: 'Living Room', width: 100, depth: 60, height: 75 };
     newItemPhoto = null;
+    newItemColor = '#7c8ea3';
     addItemError = null;
   }
 
@@ -233,11 +235,37 @@
         const ctx = canvas.getContext('2d');
         if (!ctx) return resolve(dataUrl);
         ctx.drawImage(img, 0, 0, w, h);
+        // While it's here, take the photo's dominant colour so the 2D symbol
+        // and the 3D placeholder box look like *this* item, not generic grey.
+        newItemColor = dominantColor(ctx, w, h);
         resolve(canvas.toDataURL('image/jpeg', 0.82));
       };
       img.onerror = () => resolve(dataUrl);
       img.src = dataUrl;
     });
+  }
+
+  /**
+   * Average colour of the subject, skipping near-white/near-transparent pixels
+   * — product shots sit on white backgrounds that would wash the result out.
+   */
+  function dominantColor(ctx: CanvasRenderingContext2D, w: number, h: number): string {
+    try {
+      const { data } = ctx.getImageData(0, 0, w, h);
+      let r = 0, g = 0, b = 0, n = 0;
+      for (let i = 0; i < data.length; i += 16) { // every 4th pixel
+        const [pr, pg, pb, pa] = [data[i], data[i + 1], data[i + 2], data[i + 3]];
+        if (pa < 128) continue;
+        if (pr > 232 && pg > 232 && pb > 232) continue; // white backdrop
+        if (pr < 18 && pg < 18 && pb < 18) continue; // hard shadows
+        r += pr; g += pg; b += pb; n++;
+      }
+      if (n < 50) return '#7c8ea3'; // not enough subject pixels — keep neutral
+      const hex = (v: number) => Math.round(v / n).toString(16).padStart(2, '0');
+      return `#${hex(r)}${hex(g)}${hex(b)}`;
+    } catch {
+      return '#7c8ea3';
+    }
   }
 
   function onItemPhotoUpload(e: Event) {
@@ -276,7 +304,7 @@
       name,
       category: newItem.category,
       icon: '📦',
-      color: '#7c8ea3',
+      color: newItemColor,
       width,
       depth,
       height,
