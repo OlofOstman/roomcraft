@@ -2228,6 +2228,64 @@
     markSceneDirty();
   }
 
+  /**
+   * Export the apartment as a binary glTF (.glb) — the interchange format for
+   * Marble/Chisel, HunyuanWorld, Blender and game engines. Everything the
+   * user built lives under wallGroup (walls, floors, ceilings, doors,
+   * windows, furniture, stairs); the ground plane, sky and lights are
+   * editor scenery and stay out of the file.
+   */
+  let exportingGlb = $state(false);
+  async function exportGLB() {
+    if (!scene || exportingGlb) return;
+    exportingGlb = true;
+    try {
+      const { GLTFExporter } = await import('three/examples/jsm/exporters/GLTFExporter.js');
+
+      // Deep-clone (geometry/materials are shared, so this is cheap) and strip
+      // editor-only visuals: room-label sprites, the interior-camera helper,
+      // outline/helper lines, and anything currently hidden.
+      const apartment = wallGroup.clone(true);
+      const doomed: THREE.Object3D[] = [];
+      apartment.traverse((obj) => {
+        if (
+          obj instanceof THREE.Sprite ||
+          obj.name === 'interior_camera' ||
+          obj instanceof THREE.Line ||
+          !obj.visible
+        ) {
+          doomed.push(obj);
+        }
+      });
+      for (const obj of doomed) obj.parent?.remove(obj);
+
+      // The scene is modelled in centimetres; glTF convention is metres.
+      const root = new THREE.Group();
+      root.name = 'apartment';
+      root.scale.setScalar(0.01);
+      root.add(apartment);
+      root.updateMatrixWorld(true);
+
+      const exporter = new GLTFExporter();
+      const buffer = (await exporter.parseAsync(root, {
+        binary: true,
+        onlyVisible: true,
+      })) as ArrayBuffer;
+
+      const projectName = get(currentProject)?.name?.trim() || 'apartment';
+      const link = document.createElement('a');
+      link.download = `${projectName.replace(/[^\w\-]+/g, '-').toLowerCase()}.glb`;
+      link.href = URL.createObjectURL(new Blob([buffer], { type: 'model/gltf-binary' }));
+      link.click();
+      URL.revokeObjectURL(link.href);
+    } catch (err) {
+      console.error('[ThreeViewer] GLB export failed:', err);
+      alert(`3D export failed: ${err instanceof Error ? err.message : err}`);
+    } finally {
+      exportingGlb = false;
+    }
+  }
+
   function takeScreenshot() {
     if (!renderer || !scene || !camera) return;
     renderMain();
@@ -2404,6 +2462,25 @@
         <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
         <circle cx="12" cy="13" r="4"/>
       </svg>
+    </button>
+
+    <!-- GLB Export Button -->
+    <button
+      onclick={exportGLB}
+      disabled={exportingGlb}
+      class="p-2 rounded-lg bg-black/70 text-white hover:bg-black/80 transition-colors disabled:opacity-50"
+      title="Export 3D scene (.glb) — for Marble, Blender, game engines"
+      aria-label="Export 3D scene as GLB"
+    >
+      {#if exportingGlb}
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="animate-spin"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+      {:else}
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+          <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+          <line x1="12" y1="22.08" x2="12" y2="12"/>
+        </svg>
+      {/if}
     </button>
 
     <!-- Walkthrough Mode Toggle Button -->
