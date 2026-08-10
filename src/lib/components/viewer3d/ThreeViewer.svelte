@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { get } from 'svelte/store';
+  import { base } from '$app/paths';
   import { activeFloor, currentProject, detectedRoomsStore, selectedElementId } from '$lib/stores/project';
   import type { Floor, Wall, Door, Window as Win, Room, Stair } from '$lib/models/types';
   import { wallColors, type WallColor } from '$lib/utils/materials';
@@ -19,6 +20,15 @@
   import { createFurnitureModelWithGLB } from '$lib/utils/furnitureModelLoader';
   import { addFurniture } from '$lib/stores/project';
   import { detectRooms, getRoomPolygon, roomCentroid } from '$lib/utils/roomDetection';
+  import { bestHeading, buildViewpoints, findClearSpawn, type Viewpoint } from '$lib/utils/viewpoints';
+  import { captureEquirectangular, loadImageToCanvas, resizeCanvas } from '$lib/utils/panorama';
+  import {
+    INTERIOR_STYLES,
+    LIGHTING_STYLES,
+    PANORAMA_WIDTH,
+    cachePanorama,
+    generatePhotorealPanorama,
+  } from '$lib/utils/photorealTour';
   import { getMaterial } from '$lib/utils/materials';
   import { getWallTextureCanvas, getFloorTextureCanvas, setTextureLoadCallback } from '$lib/utils/textureGenerator';
 
@@ -294,6 +304,362 @@
     link.download = `${projectName}-ai-render.png`;
     link.href = aiRenderResult;
     link.click();
+  }
+
+  // ───────────────────────────── Photoreal tour ─────────────────────────────
+  //
+  // The AI render above turns one frame photoreal. A walkthrough cannot work
+  // that way — the model needs seconds per image and invents different details
+  // every call, so a moving camera would strobe. Pay the cost per *viewpoint*
+  // instead: one 360° panorama per room, generated once, then walk between
+  // them and look around freely inside the results.
+
+  let tourPanelOpen = $state(false);
+  let tourViewpoints = $state<Viewpoint[]>([]);
+  let tourPanoramas = $state<Record<string, string>>({});
+  let tourGenerating = $state(false);
+  let tourProgress = $state<{ done: number; total: number; label: string }>({ done: 0, total: 0, label: '' });
+  let tourError = $state<string | null>(null);
+  let tourActive = $state(false);
+  let tourIndex = $state(0);
+  let tourFading = $state(false);
+  let tourInterior = $state(INTERIOR_STYLES[0]);
+  let tourLighting = $state(LIGHTING_STYLES[0]);
+  let tourExtra = $state('');
+  let tourAbort: AbortController | null = null;
+
+  let panoDome: THREE.Mesh | null = null;
+  let panoTexture: THREE.Texture | null = null;
+  let hotspotGroup: THREE.Group | null = null;
+  let hotspotTargets: { sprite: THREE.Sprite; index: number }[] = [];
+  let hiddenForTour: THREE.Object3D[] = [];
+  let savedBackground: THREE.Scene['background'] = null;
+
+  const tourReady = $derived(tourViewpoints.filter((v) => tourPanoramas[v.id]));
+
+  function refreshTourViewpoints() {
+    tourViewpoints = currentFloor ? buildViewpoints(currentFloor) : [];
+  }
+
+  /**
+   * Render one viewpoint as an equirectangular 360. Editor scenery — room
+   * labels, the camera helper, x-ray walls — has to be out of the way first, or
+   * the model will faithfully make a floating text sprite photorealistic.
+   */
+  function captureViewpointPanorama(vp: Viewpoint): HTMLCanvasElement {
+    const helperWasVisible = cameraHelper?.visible ?? false;
+    const wasXray = wallsTransparent;
+    if (cameraHelper) cameraHelper.visible = false;
+    if (wasXray) setWallsXray(false);
+    setSpritesVisible(false);
+    try {
+      const position = new THREE.Vector3(vp.position.x, eyeHeight, vp.position.y);
+      return captureEquirectangular(renderer, scene, position, { width: PANORAMA_WIDTH });
+    } finally {
+      setSpritesVisible(true);
+      if (wasXray) setWallsXray(true);
+      if (cameraHelper) cameraHelper.visible = helperWasVisible;
+      markSceneDirty();
+    }
+  }
+
+  /** Download the raw (pre-AI) 360 for the current room — handy for debugging. */
+  function downloadRawPanorama() {
+    refreshTourViewpoints();
+    const vp = tourViewpoints[tourIndex] ?? tourViewpoints[0];
+    if (!vp) return;
+    const link = document.createElement('a');
+    link.download = `${vp.name.replace(/\W+/g, '-').toLowerCase()}-360-source.png`;
+    link.href = captureViewpointPanorama(vp).toDataURL('image/png');
+    link.click();
+  }
+
+  /**
+   * The same tour, built from the raw 360 captures with no model call. Free and
+   * instant, so it is what a user without an API key gets — and it is the
+   * honest way to check the room-to-room navigation before spending on
+   * generation.
+   */
+  function previewTourWithoutAI() {
+    if (!renderer || !scene) return;
+    refreshTourViewpoints();
+    if (!tourViewpoints.length) {
+      tourError = 'No rooms found — draw at least one enclosed room first.';
+      return;
+    }
+    tourError = null;
+    const next: Record<string, string> = { ...tourPanoramas };
+    for (const vp of tourViewpoints) {
+      // JPEG at 4096×2048 keeps a whole tour inside a sane amount of memory.
+      next[vp.id] = captureViewpointPanorama(vp).toDataURL('image/jpeg', 0.9);
+    }
+    tourPanoramas = next;
+    enterTour(0);
+  }
+
+  async function generateTour() {
+    if (!renderer || !scene || tourGenerating) return;
+    refreshTourViewpoints();
+    if (!tourViewpoints.length) {
+      tourError = 'No rooms found — draw at least one enclosed room first.';
+      return;
+    }
+
+    tourGenerating = true;
+    tourError = null;
+    tourAbort = new AbortController();
+    const project = get(currentProject);
+    const apiKey = localStorage.getItem('o3d_gemini_key') ?? undefined;
+    const style = { interior: tourInterior, lighting: tourLighting, extra: tourExtra };
+    // The first room sets the look; every later room is handed a thumbnail of
+    // it so the whole tour reads as one apartment rather than seven flats.
+    let reference: string | undefined;
+
+    try {
+      for (let i = 0; i < tourViewpoints.length; i++) {
+        const vp = tourViewpoints[i];
+        tourProgress = { done: i, total: tourViewpoints.length, label: vp.name };
+
+        const source = captureViewpointPanorama(vp);
+        const panorama = await generatePhotorealPanorama(source, {
+          style,
+          roomName: vp.name,
+          reference,
+          apiKey,
+          signal: tourAbort.signal,
+        });
+
+        tourPanoramas = { ...tourPanoramas, [vp.id]: panorama };
+        if (!reference) reference = resizeCanvas(await loadImageToCanvas(panorama), 1024, 512).toDataURL('image/jpeg', 0.8);
+        if (project) await cachePanorama(project.id, vp.id, panorama).catch(() => {});
+      }
+
+      tourProgress = { done: tourViewpoints.length, total: tourViewpoints.length, label: '' };
+      enterTour(0);
+    } catch (err) {
+      if ((err as Error)?.name !== 'AbortError') {
+        tourError = err instanceof Error ? err.message : String(err);
+      }
+    } finally {
+      tourGenerating = false;
+      tourAbort = null;
+    }
+  }
+
+  function cancelTourGeneration() {
+    tourAbort?.abort();
+  }
+
+  /**
+   * The panorama sphere. Capture and display share one projection formula —
+   * the fragment shader here is the algebraic inverse of the one in
+   * panorama.ts — so a captured 360 round-trips back to exactly the view it
+   * was taken from, with no guesswork about three's UV conventions.
+   */
+  function ensurePanoDome(): THREE.Mesh {
+    if (panoDome) return panoDome;
+    const geometry = new THREE.SphereGeometry(4000, 64, 40);
+    const material = new THREE.ShaderMaterial({
+      uniforms: { pano: { value: null }, opacity: { value: 1 } },
+      side: THREE.BackSide,
+      vertexShader: /* glsl */ `
+        varying vec3 vDir;
+        void main() {
+          vDir = position;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        precision highp float;
+        uniform sampler2D pano;
+        uniform float opacity;
+        varying vec3 vDir;
+        #define PI 3.141592653589793
+        void main() {
+          vec3 d = normalize(vDir);
+          float lat = asin(clamp(d.y, -1.0, 1.0));
+          float lon = atan(-d.x, -d.z);
+          gl_FragColor = vec4(texture2D(pano, vec2(lon / (2.0 * PI) + 0.5, lat / PI + 0.5)).rgb, opacity);
+        }
+      `,
+    });
+    panoDome = new THREE.Mesh(geometry, material);
+    panoDome.frustumCulled = false;
+    panoDome.visible = false;
+    scene.add(panoDome);
+    return panoDome;
+  }
+
+  function ensureHotspotGroup(): THREE.Group {
+    if (hotspotGroup) return hotspotGroup;
+    hotspotGroup = new THREE.Group();
+    hotspotGroup.visible = false;
+    scene.add(hotspotGroup);
+    return hotspotGroup;
+  }
+
+  /** A soft disc with an arrow, drawn once and reused for every hotspot. */
+  function hotspotTexture(): THREE.Texture {
+    const size = 128;
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = size;
+    const ctx = canvas.getContext('2d')!;
+    const gradient = ctx.createRadialGradient(size / 2, size / 2, size * 0.15, size / 2, size / 2, size / 2);
+    gradient.addColorStop(0, 'rgba(255,255,255,0.95)');
+    gradient.addColorStop(0.6, 'rgba(255,255,255,0.35)');
+    gradient.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, size, size);
+    ctx.fillStyle = 'rgba(20,20,25,0.75)';
+    ctx.beginPath();
+    ctx.moveTo(size / 2, size * 0.3);
+    ctx.lineTo(size * 0.68, size * 0.6);
+    ctx.lineTo(size / 2, size * 0.52);
+    ctx.lineTo(size * 0.32, size * 0.6);
+    ctx.closePath();
+    ctx.fill();
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    return texture;
+  }
+
+  let hotspotSpriteTexture: THREE.Texture | null = null;
+
+  /**
+   * One marker per other room, laid on the floor in that room's direction —
+   * the Street View affordance. Distance is fixed rather than true-to-plan so
+   * a marker never lands beyond the panorama's floor.
+   */
+  function rebuildHotspots() {
+    const group = ensureHotspotGroup();
+    for (const { sprite } of hotspotTargets) {
+      group.remove(sprite);
+      sprite.material.dispose();
+    }
+    hotspotTargets = [];
+
+    const current = tourViewpoints[tourIndex];
+    if (!current) return;
+    hotspotSpriteTexture ??= hotspotTexture();
+
+    tourViewpoints.forEach((vp, index) => {
+      if (index === tourIndex || !tourPanoramas[vp.id]) return;
+      const dx = vp.position.x - current.position.x;
+      const dz = vp.position.y - current.position.y;
+      const length = Math.hypot(dx, dz) || 1;
+
+      const sprite = new THREE.Sprite(
+        new THREE.SpriteMaterial({ map: hotspotSpriteTexture!, transparent: true, depthTest: false, toneMapped: false }),
+      );
+      sprite.position.set(
+        current.position.x + (dx / length) * 180,
+        12,
+        current.position.y + (dz / length) * 180,
+      );
+      sprite.scale.set(90, 90, 1);
+      group.add(sprite);
+      hotspotTargets.push({ sprite, index });
+    });
+  }
+
+  function applyTourViewpoint() {
+    const vp = tourViewpoints[tourIndex];
+    const panorama = vp && tourPanoramas[vp.id];
+    if (!vp || !panorama) return;
+
+    const dome = ensurePanoDome();
+    const loader = new THREE.TextureLoader();
+    loader.load(panorama, (texture) => {
+      texture.colorSpace = THREE.SRGBColorSpace;
+      texture.minFilter = THREE.LinearFilter;
+      texture.generateMipmaps = false;
+      panoTexture?.dispose();
+      panoTexture = texture;
+      (dome.material as THREE.ShaderMaterial).uniforms.pano.value = texture;
+      markSceneDirty();
+    });
+
+    dome.position.set(vp.position.x, eyeHeight, vp.position.y);
+    dome.visible = true;
+    camera.position.set(vp.position.x, eyeHeight, vp.position.y);
+    rebuildHotspots();
+    markSceneDirty();
+  }
+
+  /** Hide the model and its scenery; the panorama is the world now. */
+  function setSceneHiddenForTour(hidden: boolean) {
+    if (!scene) return;
+    if (hidden) {
+      hiddenForTour = [];
+      for (const child of scene.children) {
+        if (child === panoDome || child === hotspotGroup || (child as THREE.Light).isLight) continue;
+        if (child.visible) {
+          child.visible = false;
+          hiddenForTour.push(child);
+        }
+      }
+      savedBackground = scene.background;
+      scene.background = null;
+    } else {
+      for (const child of hiddenForTour) child.visible = true;
+      hiddenForTour = [];
+      scene.background = savedBackground;
+    }
+  }
+
+  function enterTour(index: number) {
+    const vp = tourViewpoints[index];
+    if (!vp || !tourPanoramas[vp.id]) return;
+
+    tourIndex = index;
+    tourActive = true;
+    tourPanelOpen = false;
+    walkthroughMode = true;
+    controls.enabled = false;
+
+    ensurePanoDome();
+    ensureHotspotGroup().visible = true;
+    setSceneHiddenForTour(true);
+    applyTourViewpoint();
+
+    // Face the room's open direction, level with the horizon.
+    camera.rotation.set(0, vp.heading, 0, 'YXZ');
+    pointerControls.lock();
+    markSceneDirty();
+  }
+
+  function exitTour() {
+    tourActive = false;
+    walkthroughMode = false;
+    controls.enabled = true;
+    if (panoDome) panoDome.visible = false;
+    if (hotspotGroup) hotspotGroup.visible = false;
+    setSceneHiddenForTour(false);
+    if (document.pointerLockElement) document.exitPointerLock();
+    markSceneDirty();
+  }
+
+  /** Travel to another viewpoint through a short fade, keeping the heading. */
+  async function goToTourViewpoint(index: number) {
+    if (index === tourIndex || tourFading || !tourViewpoints[index]) return;
+    tourFading = true;
+    await new Promise((r) => setTimeout(r, 240));
+    tourIndex = index;
+    applyTourViewpoint();
+    await new Promise((r) => setTimeout(r, 40));
+    tourFading = false;
+  }
+
+  /** Click a floor marker to walk to that room. */
+  function onTourPointerDown(event: PointerEvent) {
+    if (!tourActive || tourFading || !hotspotTargets.length) return;
+    // Pointer lock pins the cursor, so aim with the crosshair at screen centre.
+    raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+    const hit = raycaster.intersectObjects(hotspotTargets.map((t) => t.sprite), false)[0];
+    if (hit) {
+      const target = hotspotTargets.find((t) => t.sprite === hit.object);
+      if (target) void goToTourViewpoint(target.index);
+    }
   }
 
   /** Move camera in the XZ plane relative to current facing direction.
@@ -593,6 +959,8 @@
     if (fillLight) fillLight.intensity = preset === 'night' ? 0.05 : 0.4;
     if (rimLight) rimLight.intensity = preset === 'night' ? 0.05 : 0.25;
     updateSkyGradient(p.skyTop, p.skyMid, p.skyHorizon);
+    // Swap the reflected sky too, or a sunset scene keeps reflecting midday blue.
+    void applyHdriEnvironment(preset);
   }
 
   const WALL_THICKNESS = 15;
@@ -624,9 +992,30 @@
   }
 
   /**
-   * Prefilter the sky gradient into a PMREM environment map and hand it to the
-   * scene, so every MeshStandardMaterial picks up soft ambient light and
-   * grazing reflections instead of being lit only by the discrete lights.
+   * A real captured sky per time of day. The gradient below is a decent
+   * stand-in for ambient level, but it carries no sun disc, no cloud structure
+   * and no colour variation across the dome — so reflections in glass and
+   * polished floors read as flat paint. These are 1k CC0 HDRIs from Poly Haven
+   * (see static/hdri/CREDITS.md), small enough to ship with the app.
+   */
+  const TIME_HDRI: Record<'morning' | 'noon' | 'evening' | 'night', string> = {
+    morning: 'kloofendal_misty_morning_puresky_1k.hdr',
+    noon: 'kloppenheim_02_puresky_1k.hdr',
+    evening: 'venice_sunset_1k.hdr',
+    night: 'dikhololo_night_1k.hdr',
+  };
+  // Prefiltering is the expensive half, and the user flips between times of
+  // day freely, so keep each environment once it has been built.
+  const envCache = new Map<string, THREE.Texture>();
+  let hdriLoadToken = 0;
+
+  /**
+   * Prefilter an environment into a PMREM map and hand it to the scene, so
+   * every MeshStandardMaterial picks up soft ambient light and grazing
+   * reflections instead of being lit only by the discrete lights.
+   *
+   * The sky gradient goes up immediately so the scene is never unlit, then the
+   * HDRI replaces it when it arrives.
    */
   function applyEnvironment() {
     if (!renderer || !scene || !skyTexture) return;
@@ -642,6 +1031,47 @@
       console.warn('[ThreeViewer] environment map unavailable:', err);
     } finally {
       pmrem.dispose();
+    }
+    void applyHdriEnvironment(timeOfDay ?? 'noon');
+  }
+
+  async function applyHdriEnvironment(preset: 'morning' | 'noon' | 'evening' | 'night') {
+    if (!renderer || !scene) return;
+    const file = TIME_HDRI[preset];
+    const token = ++hdriLoadToken;
+
+    const cached = envCache.get(file);
+    if (cached) {
+      scene.environment = cached;
+      scene.environmentIntensity = preset === 'night' ? 0.25 : 0.5;
+      markSceneDirty();
+      return;
+    }
+
+    try {
+      // HDRLoader is the current name; RGBELoader is a deprecated alias.
+      const { HDRLoader } = await import('three/examples/jsm/loaders/HDRLoader.js');
+      const hdr = await new HDRLoader().loadAsync(`${base}/hdri/${file}`);
+      // A later preset change won the race — drop this one.
+      if (token !== hdriLoadToken || !renderer || !scene) {
+        hdr.dispose();
+        return;
+      }
+      hdr.mapping = THREE.EquirectangularReflectionMapping;
+      const pmrem = new THREE.PMREMGenerator(renderer);
+      const target = pmrem.fromEquirectangular(hdr);
+      pmrem.dispose();
+      hdr.dispose();
+
+      envCache.set(file, target.texture);
+      scene.environment = target.texture;
+      // Real HDRIs carry far more energy than the gradient, but an interior
+      // still only sees the sky through its windows.
+      scene.environmentIntensity = preset === 'night' ? 0.25 : 0.5;
+      markSceneDirty();
+    } catch (err) {
+      // The gradient environment is already in place, so this only costs quality.
+      console.warn('[ThreeViewer] HDRI environment unavailable, using sky gradient:', err);
     }
   }
 
@@ -784,7 +1214,11 @@
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.2;
+    // 1.2 clipped white walls to featureless paper once the rooms had their
+    // own lights. Measured over a captured panorama: 1.2 clipped ~30% of the
+    // frame, 1.0 ~15%, 0.85 ~3% — and clipped pixels are exactly the shading
+    // cues the image model needs to infer the geometry.
+    renderer.toneMappingExposure = 0.85;
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     container.appendChild(renderer.domElement);
 
@@ -794,6 +1228,12 @@
     // sky we already generate keeps it free of any external asset.
     applyEnvironment();
     setupComposer();
+
+    // Dev-only handle for poking at the scene from the console or a driver
+    // script — invaluable when something renders that nothing obviously added.
+    if (import.meta.env.DEV) {
+      (window as unknown as Record<string, unknown>).__roomcraft = { scene, camera, renderer, THREE };
+    }
 
     controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
@@ -808,6 +1248,7 @@
     renderer.domElement.addEventListener('pointerdown', (e) => {
       pointerDownPos = { x: e.clientX, y: e.clientY };
     });
+    renderer.domElement.addEventListener('pointerdown', onTourPointerDown);
     renderer.domElement.addEventListener('pointerup', (e) => {
       // Only select in edit mode, and only if mouse didn't move much (not a drag/orbit)
       if (!editMode) return;
@@ -1003,6 +1444,52 @@
 
     wallGroup = new THREE.Group();
     scene.add(wallGroup);
+
+    interiorLightGroup = new THREE.Group();
+    scene.add(interiorLightGroup);
+  }
+
+  /**
+   * Interior lighting.
+   *
+   * Until now the only thing lighting a room was sunlight leaking straight
+   * through the ceiling — one wall came out blown to white and everything else
+   * sat in near-darkness, which is neither convincing to walk through nor
+   * usable input for an image model. Ceilings now block the sun (as ceilings
+   * do), and every room gets its own soft fixture instead.
+   */
+  let interiorLightGroup: THREE.Group;
+
+  function buildInteriorLights(floor: Floor) {
+    if (!interiorLightGroup) return;
+    clearGroup(interiorLightGroup);
+
+    const wallHeight = floor.walls[0]?.height ?? 260;
+    for (const room of detectRooms(floor.walls)) {
+      const poly = getRoomPolygon(room, floor.walls);
+      if (poly.length < 3) continue;
+      const centre = roomCentroid(poly);
+
+      // Physically-correct point lights are candela and the scene is in
+      // centimetres, so the numbers are large: irradiance is intensity / d²,
+      // and d from a ceiling fixture to the floor is ~235.
+      //
+      // These are deliberately a supporting source, not the main one. The
+      // scene already carries ambient, hemisphere, two shadowless directional
+      // lights and an HDRI environment, none of which the ceiling blocks —
+      // sized to light the room on their own they blow every white wall out.
+      // What is missing is *directionality*, so corners fall off and the
+      // ceiling reads as lit from below.
+      const light = new THREE.PointLight(0xfff1de, 7000 + room.area * 350, 0, 2);
+      light.position.set(centre.x, wallHeight - 25, centre.y);
+      interiorLightGroup.add(light);
+
+      // A second, dimmer source at head height keeps the walls from falling
+      // away into black at the edges of the room.
+      const fill = new THREE.PointLight(0xf3f0ff, 2500 + room.area * 120, 0, 2);
+      fill.position.set(centre.x, 150, centre.y);
+      interiorLightGroup.add(fill);
+    }
   }
 
   function createGhostPreview(catalogId: string) {
@@ -1759,6 +2246,9 @@
       ceilMesh.rotation.x = -Math.PI / 2;
       ceilMesh.position.y = defaultWallH;
       ceilMesh.receiveShadow = true;
+      // Without this the sun shines straight through the roof and scorches
+      // whichever wall it lands on; the room lights carry the interior now.
+      ceilMesh.castShadow = true;
       wallGroup.add(ceilMesh);
     }
 
@@ -1941,8 +2431,10 @@
   function rebuildScene() {
     if (showAllFloors) {
       buildAllFloorsStacked();
+      clearGroup(interiorLightGroup);
     } else if (currentFloor) {
       buildWalls(currentFloor);
+      buildInteriorLights(currentFloor);
     }
     markSceneDirty();
   }
@@ -2017,7 +2509,33 @@
       return;
     }
     if (!walkthroughMode) return;
-    
+
+    // In the photoreal tour the camera is pinned to a panorama's centre, so
+    // there is nothing to walk with — the arrows step between rooms instead.
+    if (tourActive) {
+      if (event.code === 'Escape') { exitTour(); return; }
+      if (event.code === 'ArrowRight' || event.code === 'ArrowUp') {
+        void goToTourViewpoint((tourIndex + 1) % tourViewpoints.length);
+        return;
+      }
+      if (event.code === 'ArrowLeft' || event.code === 'ArrowDown') {
+        void goToTourViewpoint((tourIndex - 1 + tourViewpoints.length) % tourViewpoints.length);
+        return;
+      }
+      const digit = /^Digit([1-9])$/.exec(event.code);
+      if (digit) {
+        void goToTourViewpoint(Number(digit[1]) - 1);
+        return;
+      }
+      switch (event.code) {
+        case 'KeyW': lookUp = true; break;
+        case 'KeyS': lookDown = true; break;
+        case 'KeyA': lookLeft = true; break;
+        case 'KeyD': lookRight = true; break;
+      }
+      return;
+    }
+
     switch (event.code) {
       // Arrows = move
       case 'ArrowUp': moveForward = true; break;
@@ -2085,55 +2603,6 @@
     }
   }
   
-  /**
-   * Pick a spawn point that isn't inside furniture. The room centroid is the
-   * natural spot, but in a furnished plan it's often the middle of a sofa or
-   * dining table — walkthrough then starts with a faceful of upholstery.
-   * Spiral outward from the centroid and take the first clear position.
-   */
-  function findClearSpawn(
-    centroid: { x: number; y: number },
-    roomPoly: { x: number; y: number }[],
-    floor: Floor,
-  ): { x: number; y: number } {
-    const CLEARANCE = 35; // cm of personal space around the camera
-    const blockers = floor.furniture
-      .map((f) => {
-        const def = getCatalogItem(f.catalogId);
-        if (!def || def.symbol) return null;
-        // Conservative circle test: half the footprint diagonal + clearance.
-        const w = (f.width ?? def.width) * (f.scale?.x ?? 1);
-        const d = (f.depth ?? def.depth) * (f.scale?.y ?? 1);
-        return { x: f.position.x, y: f.position.y, r: Math.hypot(w, d) / 2 + CLEARANCE };
-      })
-      .filter(Boolean) as { x: number; y: number; r: number }[];
-
-    const isClear = (p: { x: number; y: number }) =>
-      blockers.every((b) => Math.hypot(p.x - b.x, p.y - b.y) > b.r);
-
-    if (isClear(centroid)) return centroid;
-
-    // Golden-angle spiral: good angular coverage without a grid.
-    for (let i = 1; i <= 60; i++) {
-      const r = 25 * Math.sqrt(i);
-      const a = i * 2.39996;
-      const p = { x: centroid.x + r * Math.cos(a), y: centroid.y + r * Math.sin(a) };
-      if (isClear(p) && pointInPolygon(p, roomPoly)) return p;
-    }
-    return centroid; // fully furnished room — give up gracefully
-  }
-
-  function pointInPolygon(p: { x: number; y: number }, poly: { x: number; y: number }[]): boolean {
-    let inside = false;
-    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-      const a = poly[i], b = poly[j];
-      if (a.y > p.y !== b.y > p.y && p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y) + a.x) {
-        inside = !inside;
-      }
-    }
-    return inside;
-  }
-
   function enterWalkthroughMode() {
     walkthroughMode = true;
     controls.enabled = false;
@@ -2142,6 +2611,7 @@
     if (currentFloor) {
       const rooms = detectRooms(currentFloor.walls);
       let startPos = { x: 0, y: eyeHeight, z: 0 };
+      let spawnHeading: number | null = null;
       
       if (rooms.length > 0) {
         // Find largest room and position camera at its center
@@ -2158,8 +2628,11 @@
         const poly = getRoomPolygon(largestRoom, currentFloor.walls);
         if (poly.length > 0) {
           const centroid = roomCentroid(poly);
-          const clear = findClearSpawn(centroid, poly, currentFloor);
+          // Keep some distance off the walls: spawning 90cm from plaster and
+          // facing it means the walkthrough opens on a blank white rectangle.
+          const clear = findClearSpawn(centroid, poly, currentFloor, 120);
           startPos = { x: clear.x, y: eyeHeight, z: clear.y };
+          spawnHeading = bestHeading(clear, poly);
         }
       } else if (currentFloor.walls.length > 0) {
         // No rooms, use center of floor plan
@@ -2174,7 +2647,12 @@
       }
       
       camera.position.set(startPos.x, startPos.y, startPos.z);
-      camera.lookAt(startPos.x, startPos.y, startPos.z - 100); // Look forward initially
+      if (spawnHeading === null) {
+        camera.lookAt(startPos.x, startPos.y, startPos.z - 100); // Look forward initially
+      } else {
+        // Face down the length of the room rather than at the nearest wall.
+        camera.rotation.set(0, spawnHeading, 0, 'YXZ');
+      }
     }
     
     pointerControls.lock();
@@ -2198,20 +2676,24 @@
     if (walkthroughMode) {
       const delta = 0.016; // Approximate 60fps
       const speed = isShiftHeld ? sprintSpeed : moveSpeed;
-      
-      velocity.x -= velocity.x * 10.0 * delta;
-      velocity.z -= velocity.z * 10.0 * delta;
-      
-      direction.z = Number(moveForward) - Number(moveBackward);
-      direction.x = Number(moveRight) - Number(moveLeft);
-      direction.normalize();
-      
-      if (moveForward || moveBackward) velocity.z -= direction.z * speed * delta;
-      if (moveLeft || moveRight) velocity.x -= direction.x * speed * delta;
-      
-      pointerControls.moveRight(-velocity.x * delta);
-      pointerControls.moveForward(-velocity.z * delta);
-      camera.position.y = eyeHeight;
+
+      // The tour camera is the centre of a panorama sphere: translating it
+      // would slide the room off its own geometry, so only looking is allowed.
+      if (!tourActive) {
+        velocity.x -= velocity.x * 10.0 * delta;
+        velocity.z -= velocity.z * 10.0 * delta;
+
+        direction.z = Number(moveForward) - Number(moveBackward);
+        direction.x = Number(moveRight) - Number(moveLeft);
+        direction.normalize();
+
+        if (moveForward || moveBackward) velocity.z -= direction.z * speed * delta;
+        if (moveLeft || moveRight) velocity.x -= direction.x * speed * delta;
+
+        pointerControls.moveRight(-velocity.x * delta);
+        pointerControls.moveForward(-velocity.z * delta);
+        camera.position.y = eyeHeight;
+      }
 
       if (lookLeft || lookRight) {
         const yaw = ((lookLeft ? 1 : 0) - (lookRight ? 1 : 0)) * LOOK_SPEED * delta;
@@ -2523,6 +3005,20 @@
       </svg>
     {/if}
     </button>
+
+    <!-- Photoreal Tour -->
+    <button
+      onclick={() => { if (tourActive) { exitTour(); } else { tourPanelOpen = !tourPanelOpen; if (tourPanelOpen) refreshTourViewpoints(); } }}
+      class="p-2 rounded-lg transition-colors {tourActive || tourPanelOpen ? 'bg-emerald-600 text-white hover:bg-emerald-500' : 'bg-black/70 text-white hover:bg-black/80'}"
+      title={tourActive ? 'Exit photoreal tour' : 'Photoreal tour'}
+      aria-label={tourActive ? 'Exit photoreal tour' : 'Photoreal tour'}
+    >
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="9"/>
+        <ellipse cx="12" cy="12" rx="4" ry="9"/>
+        <path d="M3.3 9h17.4M3.3 15h17.4"/>
+      </svg>
+    </button>
   </div><!-- end 3D toolbar row -->
 
   {#if cameraPlacementMode && !cameraPlaced}
@@ -2707,7 +3203,112 @@
     </div>
   {/if}
 
-  {#if walkthroughMode}
+  <!-- Photoreal tour setup -->
+  {#if tourPanelOpen && !tourActive}
+    <div class="absolute top-16 right-4 z-50 w-[340px] max-w-[calc(100vw-2rem)] bg-gray-900/95 text-white rounded-xl shadow-2xl backdrop-blur-sm overflow-hidden">
+      <div class="flex items-center justify-between px-3 py-2 border-b border-gray-700">
+        <span class="text-sm font-semibold">Photoreal tour</span>
+        <button class="text-gray-400 hover:text-white text-lg leading-none" onclick={() => { tourPanelOpen = false; }} aria-label="Close">✕</button>
+      </div>
+
+      <div class="p-3 space-y-3 text-xs">
+        <p class="text-white/60 leading-relaxed">
+          Renders a 360° view of each room and has Gemini repaint it as a photograph.
+          You then walk the apartment through the results.
+        </p>
+
+        <label class="block space-y-1">
+          <span class="text-white/70">Interior style</span>
+          <select bind:value={tourInterior} class="w-full bg-gray-800 rounded px-2 py-1.5 border border-gray-700">
+            {#each INTERIOR_STYLES as style}<option value={style}>{style}</option>{/each}
+          </select>
+        </label>
+
+        <label class="block space-y-1">
+          <span class="text-white/70">Lighting</span>
+          <select bind:value={tourLighting} class="w-full bg-gray-800 rounded px-2 py-1.5 border border-gray-700">
+            {#each LIGHTING_STYLES as style}<option value={style}>{style}</option>{/each}
+          </select>
+        </label>
+
+        <label class="block space-y-1">
+          <span class="text-white/70">Extra direction (optional)</span>
+          <input bind:value={tourExtra} placeholder="e.g. plants on the shelves, oak floor" class="w-full bg-gray-800 rounded px-2 py-1.5 border border-gray-700" />
+        </label>
+
+        <div class="text-white/60">
+          {tourViewpoints.length} room{tourViewpoints.length === 1 ? '' : 's'} detected
+          {#if tourReady.length}· {tourReady.length} already generated{/if}
+        </div>
+
+        {#if tourGenerating}
+          <div class="space-y-1.5">
+            <div class="flex justify-between text-white/70">
+              <span>Rendering {tourProgress.label}…</span>
+              <span>{tourProgress.done}/{tourProgress.total}</span>
+            </div>
+            <div class="h-1.5 bg-gray-800 rounded overflow-hidden">
+              <div class="h-full bg-emerald-500 transition-all" style="width: {tourProgress.total ? (tourProgress.done / tourProgress.total) * 100 : 0}%"></div>
+            </div>
+            <button class="w-full py-1.5 rounded bg-gray-800 hover:bg-gray-700" onclick={cancelTourGeneration}>Cancel</button>
+          </div>
+        {:else}
+          <div class="flex gap-2">
+            <button class="flex-1 py-2 rounded bg-emerald-600 hover:bg-emerald-500 font-medium disabled:opacity-40" disabled={!tourViewpoints.length} onclick={generateTour}>
+              ✨ Generate tour
+            </button>
+            {#if tourReady.length}
+              <button class="px-3 py-2 rounded bg-gray-800 hover:bg-gray-700" onclick={() => enterTour(tourViewpoints.findIndex((v) => tourPanoramas[v.id]))}>Enter</button>
+            {/if}
+          </div>
+          <div class="flex gap-2">
+            <button class="flex-1 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-white/70" disabled={!tourViewpoints.length} onclick={previewTourWithoutAI}>
+              Preview tour (no AI)
+            </button>
+            <button class="px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-white/70" title="Download the raw 360 capture" onclick={downloadRawPanorama}>
+              ⤓ 360
+            </button>
+          </div>
+        {/if}
+
+        {#if tourError}
+          <div class="text-red-400 bg-red-950/40 rounded p-2 leading-relaxed">{tourError}</div>
+        {/if}
+      </div>
+    </div>
+  {/if}
+
+  <!-- In-tour HUD -->
+  {#if tourActive}
+    <div class="absolute inset-0 z-30 pointer-events-none bg-black transition-opacity duration-200" style="opacity: {tourFading ? 1 : 0}"></div>
+
+    <div class="absolute top-4 left-4 z-30 bg-black/60 text-white rounded-lg backdrop-blur-sm px-3 py-2">
+      <div class="text-sm font-semibold">{tourViewpoints[tourIndex]?.name ?? 'Tour'}</div>
+      <div class="text-[11px] text-white/60">Photoreal · room {tourIndex + 1} of {tourViewpoints.length}</div>
+    </div>
+
+    <div class="absolute inset-0 pointer-events-none z-30 flex items-center justify-center">
+      <div class="w-2 h-2 rounded-full border border-white/70 shadow"></div>
+    </div>
+
+    <div class="absolute bottom-4 left-1/2 -translate-x-1/2 z-30 flex flex-col items-center gap-2">
+      <div class="flex gap-1.5 bg-black/60 rounded-lg backdrop-blur-sm p-1.5">
+        {#each tourViewpoints as vp, i}
+          {#if tourPanoramas[vp.id]}
+            <button
+              class="px-2.5 py-1 rounded text-xs transition-colors {i === tourIndex ? 'bg-emerald-500 text-white' : 'bg-white/10 text-white/80 hover:bg-white/20'}"
+              onclick={() => goToTourViewpoint(i)}
+            >{vp.name}</button>
+          {/if}
+        {/each}
+      </div>
+      <div class="bg-black/60 text-white/80 text-xs px-3 py-1.5 rounded-lg backdrop-blur-sm">
+        Mouse or WASD to look • click a floor marker or ← → to change room • ESC to exit
+      </div>
+    </div>
+  {/if}
+
+  {#if walkthroughMode && !tourActive}
     <!-- Crosshair -->
     <div class="absolute inset-0 pointer-events-none z-10 flex items-center justify-center">
       <div class="w-4 h-4">

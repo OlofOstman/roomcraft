@@ -70,6 +70,40 @@ is now unused. Left in place for now; delete once the photo flow is settled.
 - [x] 14. Walkthrough spawn: golden-angle spiral from the room centroid to the first
       point clear of furniture footprints (circle approximation + 35cm clearance).
 
+## Photoreal walkthrough (2026-08-10)
+
+The goal was a photorealistic walkthrough a user can actually use. Per-frame AI
+cannot do it — seconds per image, and a fresh hallucination each call, so a
+moving camera strobes. The cost moves off the frame loop and onto *viewpoints*:
+one AI-repainted 360 per room, navigable like a Matterport tour.
+
+- [x] 17. `panorama.ts` — equirectangular 360 capture from the scene
+      (CubeCamera → cube map → reprojection shader), plus seam cross-fade.
+      **Found and fixed:** three only tone-maps when drawing to the canvas; a
+      render-target pass is forced to NoToneMapping internally. The first
+      captures were therefore raw linear values crushed into 8 bits — every lit
+      white wall clipped flat and `toneMappingExposure` did nothing. The cube
+      target is half-float now and the reprojection shader applies three's own
+      ACES fit. Measured over a captured panorama: clipping fell 14.7% → 0.8%.
+- [x] 18. `viewpoints.ts` — extracted the walkthrough's spawn logic, added wall
+      clearance and an opening-facing heading, and unit-tested it (9 tests).
+      The old spawn could stand 90cm from a wall *facing it*, which is why the
+      walkthrough opened on a blank white rectangle.
+- [x] 19. Interior lighting. Sunlight shone straight through the ceilings and
+      scorched whichever wall it landed on while everything else sat near
+      black. Ceilings cast shadows now, every room has its own soft fixture,
+      and exposure came down 1.2 → 0.85.
+- [x] 20. Real CC0 sky HDRIs (Poly Haven, `static/hdri/`), one per time-of-day
+      preset, replacing the environment prefiltered from the sky gradient.
+- [x] 21. `/api/photoreal` + `photorealTour.ts` — Gemini 3 Pro Image edit with
+      a geometry-preserving prompt, the previous room passed as a style
+      reference, IndexedDB caching, and a free no-AI tour without a key.
+      Gemini has no native 2:1 output, so the panorama round-trips through
+      21:9 (the documented workaround) at 4K.
+- [ ] 22. **Unverified against the live API** — no Gemini key was available on
+      this machine. Everything up to the network call is exercised; the request
+      shape, the 21:9 round trip and the response parsing need one real run.
+
 ## Next
 
 - [ ] 13. Realism round two:
