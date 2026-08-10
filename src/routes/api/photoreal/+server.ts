@@ -18,7 +18,9 @@ import type { RequestHandler } from './$types';
  */
 
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
-const DEFAULT_MODEL = 'gemini-3-pro-image-preview';
+// The GA name. `gemini-3-pro-image-preview` still resolves, but the viewer's
+// older AI-render panel is the only thing that still asks for it by name.
+const DEFAULT_MODEL = 'gemini-3-pro-image';
 const DATA_URL = /^data:image\/(png|jpe?g|webp);base64,/;
 
 interface PhotorealRequest {
@@ -98,6 +100,19 @@ export const POST: RequestHandler = async ({ request }) => {
 
   if (!response.ok) {
     const detail = await response.text().catch(() => '');
+    // A key on a project without billing reports `limit: 0` on the free-tier
+    // image quota — indistinguishable from ordinary rate limiting unless you
+    // read the metric, and no amount of retrying or shrinking the image helps.
+    if (response.status === 429 && /limit:\s*0\b/.test(detail)) {
+      return json(
+        {
+          error:
+            'This Gemini key has no image-generation quota (free tier is limit 0). ' +
+            'Enable billing on its Google Cloud project, or use a key from a billed project.',
+        },
+        { status: 402 },
+      );
+    }
     return json(
       { error: `Image service returned HTTP ${response.status}. ${truncate(detail)}` },
       { status: response.status === 429 ? 429 : 502 },

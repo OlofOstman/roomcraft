@@ -100,9 +100,17 @@ one AI-repainted 360 per room, navigable like a Matterport tour.
       reference, IndexedDB caching, and a free no-AI tour without a key.
       Gemini has no native 2:1 output, so the panorama round-trips through
       21:9 (the documented workaround) at 4K.
-- [ ] 22. **Unverified against the live API** — no Gemini key was available on
-      this machine. Everything up to the network call is exercised; the request
-      shape, the 21:9 round trip and the response parsing need one real run.
+- [ ] 22. **Generation unverified against the live API.** A key was supplied and
+      is valid — it lists models, and a Gemma text call returns 200 — but its
+      project has `limit: 0` free-tier quota for *every* Gemini image model at
+      every image size, so nothing generates. Gemini image generation needs a
+      project with billing enabled; this is not something the client can work
+      around, and the endpoint now says so instead of surfacing a raw 429.
+      Verified up to that point: request shape (Google's only complaint on a
+      bad key is the key), the unconfigured 503 path, and response parsing.
+      Still needs one real run to confirm the 21:9 round trip and seam blend.
+- [ ] 23. ROTATE the Gemini key pasted into the chat session (same mistake as
+      the Tripo key in item 16), then put the new one only in .env.
 
 ## Next
 
