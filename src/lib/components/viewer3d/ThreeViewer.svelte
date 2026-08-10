@@ -334,6 +334,8 @@
   let hotspotTargets: { sprite: THREE.Sprite; index: number }[] = [];
   let hiddenForTour: THREE.Object3D[] = [];
   let savedBackground: THREE.Scene['background'] = null;
+  let savedFov: number | null = null;
+  const TOUR_FOV = 75;
 
   const tourReady = $derived(tourViewpoints.filter((v) => tourPanoramas[v.id]));
 
@@ -498,26 +500,39 @@
     return hotspotGroup;
   }
 
-  /** A soft disc with an arrow, drawn once and reused for every hotspot. */
+  /**
+   * A ringed disc with a chevron, drawn once and reused for every hotspot —
+   * the Street View "step here" affordance. Everything is drawn inside a
+   * circular clip so the sprite's square corners stay fully transparent; a
+   * square of near-transparent pixels reads as a dark pane floating in the
+   * room rather than as a marker on the floor.
+   */
   function hotspotTexture(): THREE.Texture {
     const size = 128;
     const canvas = document.createElement('canvas');
     canvas.width = canvas.height = size;
     const ctx = canvas.getContext('2d')!;
-    const gradient = ctx.createRadialGradient(size / 2, size / 2, size * 0.15, size / 2, size / 2, size / 2);
-    gradient.addColorStop(0, 'rgba(255,255,255,0.95)');
-    gradient.addColorStop(0.6, 'rgba(255,255,255,0.35)');
-    gradient.addColorStop(1, 'rgba(255,255,255,0)');
-    ctx.fillStyle = gradient;
-    ctx.fillRect(0, 0, size, size);
-    ctx.fillStyle = 'rgba(20,20,25,0.75)';
+    ctx.clearRect(0, 0, size, size);
+
+    const c = size / 2;
     ctx.beginPath();
-    ctx.moveTo(size / 2, size * 0.3);
-    ctx.lineTo(size * 0.68, size * 0.6);
-    ctx.lineTo(size / 2, size * 0.52);
-    ctx.lineTo(size * 0.32, size * 0.6);
-    ctx.closePath();
+    ctx.arc(c, c, size * 0.46, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,255,255,0.30)';
     ctx.fill();
+    ctx.lineWidth = size * 0.055;
+    ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+    ctx.stroke();
+
+    // Chevron pointing "away", i.e. toward the room this marker leads to.
+    ctx.beginPath();
+    ctx.moveTo(c, size * 0.3);
+    ctx.lineTo(size * 0.7, size * 0.62);
+    ctx.lineTo(c, size * 0.53);
+    ctx.lineTo(size * 0.3, size * 0.62);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(255,255,255,0.95)';
+    ctx.fill();
+
     const texture = new THREE.CanvasTexture(canvas);
     texture.colorSpace = THREE.SRGBColorSpace;
     return texture;
@@ -549,14 +564,22 @@
       const length = Math.hypot(dx, dz) || 1;
 
       const sprite = new THREE.Sprite(
-        new THREE.SpriteMaterial({ map: hotspotSpriteTexture!, transparent: true, depthTest: false, toneMapped: false }),
+        new THREE.SpriteMaterial({
+          map: hotspotSpriteTexture!,
+          transparent: true,
+          depthWrite: false,
+          toneMapped: false,
+          opacity: 0.9,
+        }),
       );
+      // Far enough out to sit on the floor rather than at your feet, small
+      // enough not to dominate the frame at the tour's wider field of view.
       sprite.position.set(
-        current.position.x + (dx / length) * 180,
-        12,
-        current.position.y + (dz / length) * 180,
+        current.position.x + (dx / length) * 220,
+        10,
+        current.position.y + (dz / length) * 220,
       );
-      sprite.scale.set(90, 90, 1);
+      sprite.scale.set(55, 55, 1);
       group.add(sprite);
       hotspotTargets.push({ sprite, index });
     });
@@ -622,6 +645,14 @@
     setSceneHiddenForTour(true);
     applyTourViewpoint();
 
+    // The editor's 50° is a photographer's short telephoto: standing still in a
+    // room it frames a rectangle of blank wall. Every 360 viewer opens wider
+    // than that, and at 75° you take in a corner, a window and the floor at
+    // once — which is the whole point of standing in a panorama.
+    savedFov = camera.fov;
+    camera.fov = TOUR_FOV;
+    camera.updateProjectionMatrix();
+
     // Face the room's open direction, level with the horizon.
     camera.rotation.set(0, vp.heading, 0, 'YXZ');
     pointerControls.lock();
@@ -632,6 +663,11 @@
     tourActive = false;
     walkthroughMode = false;
     controls.enabled = true;
+    if (savedFov !== null) {
+      camera.fov = savedFov;
+      camera.updateProjectionMatrix();
+      savedFov = null;
+    }
     if (panoDome) panoDome.visible = false;
     if (hotspotGroup) hotspotGroup.visible = false;
     setSceneHiddenForTour(false);
