@@ -8,7 +8,7 @@
  * how a Matterport tour works, and it is the shape that fits here.
  *
  * Per viewpoint: render an equirectangular 360 from the three.js scene, hand it
- * to Gemini's image model as an edit, and cache the photoreal panorama.
+ * to an image-editing model, and cache the photoreal panorama.
  */
 import { blendPanoramaSeam, loadImageToCanvas, resizeCanvas } from '$lib/utils/panorama';
 import { putDataUrl, resolveAssetUrl } from '$lib/services/blobStore';
@@ -17,15 +17,31 @@ import { putDataUrl, resolveAssetUrl } from '$lib/services/blobStore';
 export const PANORAMA_WIDTH = 4096;
 export const PANORAMA_HEIGHT = PANORAMA_WIDTH / 2;
 
+export type PhotorealProvider = 'gemini' | 'openai';
+
 /**
  * Gemini has no native 2:1 output, so the panorama is squashed into the closest
- * ratio it does support and stretched back on return. The Google Cloud writeup
- * on editing equirectangular images with Gemini 3 Pro Image uses exactly this
- * 21:9 round trip.
+ * ratio it does support and stretched back on return — the 21:9 round trip from
+ * Google's own writeup on editing equirectangular images. Every pixel gets
+ * resampled twice and the model reasons about a distorted room.
+ *
+ * gpt-image-2 takes arbitrary sizes, and 3840x1920 satisfies all of its
+ * constraints (both edges a multiple of 16, long edge <= 3840, ratio within
+ * 3:1), so there the panorama stays 2:1 the whole way through and the only
+ * resampling is a clean uniform scale.
  */
-export const MODEL_ASPECT = '21:9';
-const MODEL_WIDTH = 4096;
-const MODEL_HEIGHT = 1755; // 4096 / (21/9), rounded
+export const MODEL_TARGETS: Record<
+  PhotorealProvider,
+  { width: number; height: number; aspectRatio?: string; imageSize?: string; size?: string; native: boolean }
+> = {
+  gemini: { width: 4096, height: 1755, aspectRatio: '21:9', imageSize: '4K', native: false },
+  openai: { width: 3840, height: 1920, size: '3840x1920', native: true },
+};
+
+export const PROVIDER_LABELS: Record<PhotorealProvider, string> = {
+  gemini: 'Gemini 3 Pro Image (4K, squashed to 21:9)',
+  openai: 'OpenAI gpt-image-2 (native 2:1, 3840×1920)',
+};
 
 export interface TourStyle {
   /** e.g. "scandinavian apartment" */
@@ -59,9 +75,16 @@ export const LIGHTING_STYLES = [
  * "fix" the panorama into a normal photo), pin the geometry (so the plan is
  * still the plan), and fix the look (so room two matches room one).
  */
-export function buildPanoramaPrompt(style: TourStyle, roomName: string, hasReference: boolean): string {
+export function buildPanoramaPrompt(
+  style: TourStyle,
+  roomName: string,
+  hasReference: boolean,
+  squashed = true,
+): string {
   const lines = [
-    'This image is a 360° equirectangular panorama of a room interior, vertically compressed to a 21:9 frame.',
+    squashed
+      ? 'This image is a 360° equirectangular panorama of a room interior, vertically compressed to a 21:9 frame.'
+      : 'This image is a 360° equirectangular panorama of a room interior, in its true 2:1 proportions.',
     'Redraw it as a photorealistic architectural interior photograph, keeping the equirectangular projection exactly intact.',
     '',
     'STRICT — do not change:',
@@ -81,9 +104,12 @@ export function buildPanoramaPrompt(style: TourStyle, roomName: string, hasRefer
   ];
 
   if (hasReference) {
+    // Identified by content, not by position: the two providers disagree about
+    // which end of the list the subject goes on, and a prompt that says "the
+    // first image" silently edits the wrong one when that order flips.
     lines.push(
       '',
-      'The first image is another room from the SAME apartment that has already been rendered. Match its materials, floor, wall colour, trim, lighting temperature and photographic style precisely, so the two rooms look like one home photographed on one day.',
+      'You have been given a second image: an already-photorealistic panorama of another room in the SAME apartment. It is a finished reference, not something to edit. Match its materials, floor, wall colour, trim, lighting temperature and photographic style precisely, so the two rooms look like one home photographed on one day. Edit only the flat-shaded 3D panorama.',
     );
   }
   if (roomName) lines.push('', `This room is the ${roomName.toLowerCase()}. Furnish and dress it accordingly.`);
@@ -100,7 +126,25 @@ export interface GenerateOptions {
   /** User-supplied key, when the server has none configured. */
   apiKey?: string;
   model?: string;
+  provider?: PhotorealProvider;
   signal?: AbortSignal;
+}
+
+export interface ProviderStatus {
+  configured: boolean;
+  providers: Record<PhotorealProvider, boolean>;
+  default: PhotorealProvider | null;
+}
+
+/** Which providers the server holds a key for, so the UI can say so up front. */
+export async function getProviderStatus(): Promise<ProviderStatus> {
+  try {
+    const response = await fetch('/api/photoreal');
+    if (!response.ok) throw new Error(String(response.status));
+    return (await response.json()) as ProviderStatus;
+  } catch {
+    return { configured: false, providers: { gemini: false, openai: false }, default: null };
+  }
 }
 
 /**
@@ -111,27 +155,32 @@ export async function generatePhotorealPanorama(
   source: HTMLCanvasElement,
   options: GenerateOptions,
 ): Promise<string> {
-  const squashed = resizeCanvas(source, MODEL_WIDTH, MODEL_HEIGHT);
-  const prompt = buildPanoramaPrompt(options.style, options.roomName, !!options.reference);
+  const provider: PhotorealProvider = options.provider ?? 'gemini';
+  const target = MODEL_TARGETS[provider];
+  const sent = resizeCanvas(source, target.width, target.height);
+  const prompt = buildPanoramaPrompt(options.style, options.roomName, !!options.reference, !target.native);
 
   const response = await fetch('/api/photoreal', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     signal: options.signal,
     body: JSON.stringify({
-      image: squashed.toDataURL('image/jpeg', 0.92),
+      image: sent.toDataURL('image/jpeg', 0.92),
       reference: options.reference,
       prompt,
+      provider,
       model: options.model,
-      aspectRatio: MODEL_ASPECT,
-      imageSize: '4K',
+      aspectRatio: target.aspectRatio,
+      imageSize: target.imageSize,
+      size: target.size,
     }),
   });
 
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     if (data?.error === 'unconfigured') {
-      throw new Error('No Gemini API key. Add one in Settings → AI, or set GEMINI_API_KEY on the server.');
+      const envVar = provider === 'openai' ? 'OPENAI_API_KEY' : 'GEMINI_API_KEY';
+      throw new Error(`No ${provider} API key. Add one in Settings → AI, or set ${envVar} on the server.`);
     }
     throw new Error(data?.error || `Generation failed (HTTP ${response.status}).`);
   }

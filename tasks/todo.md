@@ -100,15 +100,32 @@ one AI-repainted 360 per room, navigable like a Matterport tour.
       reference, IndexedDB caching, and a free no-AI tour without a key.
       Gemini has no native 2:1 output, so the panorama round-trips through
       21:9 (the documented workaround) at 4K.
-- [ ] 22. **Generation unverified against the live API.** A key was supplied and
-      is valid — it lists models, and a Gemma text call returns 200 — but its
-      project has `limit: 0` free-tier quota for *every* Gemini image model at
-      every image size, so nothing generates. Gemini image generation needs a
-      project with billing enabled; this is not something the client can work
-      around, and the endpoint now says so instead of surfacing a raw 429.
-      Verified up to that point: request shape (Google's only complaint on a
-      bad key is the key), the unconfigured 503 path, and response parsing.
-      Still needs one real run to confirm the 21:9 round trip and seam blend.
+- [x] 24. Second provider: OpenAI `gpt-image-2` alongside Gemini, chosen in the
+      tour panel. Researching the swap turned up a real flaw in the Gemini-only
+      design: gpt-image-2 takes arbitrary sizes (edges a multiple of 16, long
+      edge ≤ 3840, ratio within 3:1), so **3840×1920 is a native 2:1** and the
+      21:9 squash-and-stretch disappears — no double resampling, and the model
+      sees an undistorted room. Gemini keeps two advantages: true 4K, and being
+      built to preserve the image it was handed, which is the entire job here.
+      Verified both branches reach their APIs and are rejected only on the key
+      (incl. the two-image multipart); neither has generated an image yet.
+      The prompt now identifies the reference by content rather than by
+      position, because the two providers put the subject at opposite ends of
+      the image list and "the first image" would silently edit the wrong one.
+- [ ] 22. **Generation unverified against the live API — same on both.** The
+      Gemini key supplied is valid (it lists models; a Gemma text call returns
+      200) but its project has `limit: 0` free-tier quota for *every* image
+      model at every size. Gemini image generation has no free tier. OpenAI
+      does not either, and additionally gates gpt-image-2 behind Persona ID
+      organisation verification on top of a card. So the blocker is an account,
+      not the code, and swapping providers does not dodge it.
+      Verified to that point on both: request shape, the unconfigured 503 path,
+      and response parsing. Still needs one real run to confirm the round trip
+      (21:9 on Gemini, straight-through on OpenAI) and the seam blend.
+      Open question only a real run answers: **does either model actually hold
+      the walls still?** If both smear the geometry, the fix is depth-
+      conditioned generation (ControlNet) — the scene can render an exact depth
+      panorama for free, but it needs a Replicate/fal pipeline, not one key.
 - [ ] 23. ROTATE the Gemini key pasted into the chat session (same mistake as
       the Tripo key in item 16), then put the new one only in .env.
 

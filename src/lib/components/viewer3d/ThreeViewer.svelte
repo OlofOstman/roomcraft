@@ -26,8 +26,11 @@
     INTERIOR_STYLES,
     LIGHTING_STYLES,
     PANORAMA_WIDTH,
+    PROVIDER_LABELS,
     cachePanorama,
     generatePhotorealPanorama,
+    getProviderStatus,
+    type PhotorealProvider,
   } from '$lib/utils/photorealTour';
   import { getMaterial } from '$lib/utils/materials';
   import { getWallTextureCanvas, getFloorTextureCanvas, setTextureLoadCallback } from '$lib/utils/textureGenerator';
@@ -326,6 +329,8 @@
   let tourInterior = $state(INTERIOR_STYLES[0]);
   let tourLighting = $state(LIGHTING_STYLES[0]);
   let tourExtra = $state('');
+  let tourProvider = $state<PhotorealProvider>('gemini');
+  let tourProviders = $state<Record<PhotorealProvider, boolean>>({ gemini: false, openai: false });
   let tourAbort: AbortController | null = null;
 
   let panoDome: THREE.Mesh | null = null;
@@ -382,6 +387,20 @@
    * honest way to check the room-to-room navigation before spending on
    * generation.
    */
+  /**
+   * Ask the server which providers it holds a key for, and preselect one, so
+   * the panel can say "no key" before the user spends a click finding out.
+   * A key pasted into Settings → AI still works when the server has none.
+   */
+  async function refreshProviders() {
+    const status = await getProviderStatus();
+    tourProviders = status.providers;
+    if (status.default) tourProvider = status.default;
+    else if (localStorage.getItem('o3d_openai_key') && !localStorage.getItem('o3d_gemini_key')) {
+      tourProvider = 'openai';
+    }
+  }
+
   function previewTourWithoutAI() {
     if (!renderer || !scene) return;
     refreshTourViewpoints();
@@ -411,7 +430,8 @@
     tourError = null;
     tourAbort = new AbortController();
     const project = get(currentProject);
-    const apiKey = localStorage.getItem('o3d_gemini_key') ?? undefined;
+    const keyName = tourProvider === 'openai' ? 'o3d_openai_key' : 'o3d_gemini_key';
+    const apiKey = localStorage.getItem(keyName) ?? undefined;
     const style = { interior: tourInterior, lighting: tourLighting, extra: tourExtra };
     // The first room sets the look; every later room is handed a thumbnail of
     // it so the whole tour reads as one apartment rather than seven flats.
@@ -428,6 +448,7 @@
           roomName: vp.name,
           reference,
           apiKey,
+          provider: tourProvider,
           signal: tourAbort.signal,
         });
 
@@ -3044,7 +3065,7 @@
 
     <!-- Photoreal Tour -->
     <button
-      onclick={() => { if (tourActive) { exitTour(); } else { tourPanelOpen = !tourPanelOpen; if (tourPanelOpen) refreshTourViewpoints(); } }}
+      onclick={() => { if (tourActive) { exitTour(); } else { tourPanelOpen = !tourPanelOpen; if (tourPanelOpen) { refreshTourViewpoints(); refreshProviders(); } } }}
       class="p-2 rounded-lg transition-colors {tourActive || tourPanelOpen ? 'bg-emerald-600 text-white hover:bg-emerald-500' : 'bg-black/70 text-white hover:bg-black/80'}"
       title={tourActive ? 'Exit photoreal tour' : 'Photoreal tour'}
       aria-label={tourActive ? 'Exit photoreal tour' : 'Photoreal tour'}
@@ -3249,9 +3270,29 @@
 
       <div class="p-3 space-y-3 text-xs">
         <p class="text-white/60 leading-relaxed">
-          Renders a 360° view of each room and has Gemini repaint it as a photograph.
-          You then walk the apartment through the results.
+          Renders a 360° view of each room and has an image model repaint it as a
+          photograph. You then walk the apartment through the results.
         </p>
+
+        <label class="block space-y-1">
+          <span class="text-white/70">Image model</span>
+          <select bind:value={tourProvider} class="w-full bg-gray-800 rounded px-2 py-1.5 border border-gray-700">
+            <option value="gemini">{PROVIDER_LABELS.gemini}</option>
+            <option value="openai">{PROVIDER_LABELS.openai}</option>
+          </select>
+          <span class="block text-white/40 leading-relaxed">
+            {#if tourProvider === 'openai'}
+              Emits a true 2:1 panorama, so nothing is squashed — but caps at 3840px
+              and needs a verified OpenAI organisation.
+            {:else}
+              Sharper at 4K and the better geometry-preserver, but has no 2:1 output,
+              so the panorama round-trips through 21:9.
+            {/if}
+            {#if !tourProviders[tourProvider]}
+              <span class="text-amber-400">No server key — paste one in Settings → AI.</span>
+            {/if}
+          </span>
+        </label>
 
         <label class="block space-y-1">
           <span class="text-white/70">Interior style</span>

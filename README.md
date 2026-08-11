@@ -41,7 +41,7 @@ the confirm step. Copy `.env.example` to `.env` to enable the fallback.
 
 The globe button in the 3D view builds a walkthrough you can actually show
 someone. It renders a 4096×2048 equirectangular 360 of every detected room from
-the three.js scene, sends each one to Gemini's image model as an *edit* —
+the three.js scene, sends each one to an image model as an *edit* —
 "same geometry, same furniture, same viewpoint; make it a photograph" — and
 drops the results onto a sphere you stand inside. Mouse-look is free, floor
 markers and ← → walk you between rooms, and each room after the first is given
@@ -55,9 +55,34 @@ Panoramas are cached in IndexedDB, so a tour is generated once. **Preview tour
 (no AI)** builds the same navigable tour from the raw 3D captures — free,
 instant, and what you get without a key.
 
-Gemini cannot emit a native 2:1 frame, so the panorama is squashed to 21:9 on
-the way out and stretched back on return, and the wrap-around seam is
-cross-faded. Set `GEMINI_API_KEY` in `.env`, or paste a key into Settings → AI.
+### Choosing the image model
+
+Two are wired up, selectable in the tour panel. Neither is clearly ahead, and
+**neither has a free tier** — the choice is mostly about which account you can
+get billed.
+
+| | Gemini 3 Pro Image | OpenAI gpt-image-2 |
+|---|---|---|
+| Panorama shape | no 2:1 — squashed to 21:9 and back | **native 2:1** at 3840×1920 |
+| Resolution | true 4K | 3840 max, >2560×1440 "experimental" |
+| Cost per room | ~$0.24 | ~$0.41 at high quality |
+| Strength | built around preserving the input image | arbitrary output sizes |
+| Gate | billing (free tier is `limit: 0`) | billing **+** Persona ID org verification |
+
+The 21:9 round trip is the reason to prefer OpenAI here: it resamples every
+pixel twice and hands the model a visibly distorted room to reason about. The
+reason to prefer Gemini is that holding the geometry still is the whole job, and
+that is what it is built for. Which matters more is an empirical question we
+have not been able to settle — see `tasks/todo.md` item 22.
+
+Whichever runs, the wrap-around seam is cross-faded on return. Set
+`GEMINI_API_KEY` or `OPENAI_API_KEY` in `.env`, or paste a key into Settings → AI.
+
+Neither editor *guarantees* the walls stay put. If both smear the geometry, the
+technique that actually constrains it is depth-conditioned generation
+(ControlNet) — and the scene can render an exact depth panorama for free. That
+needs a Replicate/fal pipeline rather than one API key, so it is the fallback,
+not the default.
 
 ## Layout
 
